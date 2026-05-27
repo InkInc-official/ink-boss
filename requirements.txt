@@ -1,0 +1,2 @@
+pywebview[qt]
+PySide6
