@@ -9,8 +9,10 @@ JS↔Pythonのシグナル橋渡しもここで行う。
 import json
 import threading
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
-from PySide6.QtCore import QObject, Signal, Slot, QTimer, QRect, Qt
+from PySide6.QtWebEngineCore import (
+    QWebEngineProfile, QWebEnginePage, QWebEngineSettings, QWebEngineNewWindowRequest
+)
+from PySide6.QtCore import QObject, Signal, Slot, QTimer, QRect, Qt, QUrl
 
 from config import SESSIONS_DIR, save_config
 from dialogs.settings     import show_settings_dialog
@@ -31,6 +33,28 @@ def set_win_id(wid: str) -> None:
 
 def get_win_id() -> str | None:
     return _win_id
+
+
+class _CustomPage(QWebEnginePage):
+    """
+    Googleなどのリダイレクト型リンクを正しく処理するカスタムPage。
+
+    デフォルトのQWebEnginePageは NavigationTypeLink を外部URLへ
+    遷移しようとするとブロックすることがある。
+    acceptNavigationRequest を常時Trueにして全ナビゲーションを許可する。
+    また、target="_blank" などの新規ウィンドウ要求を同じViewで開く。
+    """
+    def __init__(self, profile, parent=None):
+        super().__init__(profile, parent)
+        self.newWindowRequested.connect(self._on_new_window)
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame):
+        # すべてのナビゲーションを許可
+        return True
+
+    def _on_new_window(self, request: QWebEngineNewWindowRequest):
+        # 新規ウィンドウ要求（target="_blank"等）は同じページで開く
+        self.setUrl(request.requestedUrl())
 
 
 class ViewBridge(QObject):
@@ -110,14 +134,14 @@ class ViewBridge(QObject):
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
-        page = QWebEnginePage(profile, self.qt_app)
+        page = _CustomPage(profile, self.qt_app)
         settings = page.settings()
         settings.setAttribute(QWebEngineSettings.WebAttribute.FocusOnNavigationEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
         view = QWebEngineView(self.container)
         view.setPage(page)
-        view.setUrl(__import__("PySide6.QtCore", fromlist=["QUrl"]).QUrl("about:blank"))
+        view.setUrl(QUrl("about:blank"))
         self.hibernated.add(sid)
         view.hide()
         self.profiles[sid] = profile

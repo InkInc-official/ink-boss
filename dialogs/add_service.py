@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QComboBox,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from config import DIALOG_STYLE, save_config
 
 
@@ -79,9 +79,13 @@ def show_add_service_dialog(config: dict, js_eval_fn, create_view_fn, group_id: 
         }
         config["services"].append(svc)
         save_config(config)
-        create_view_fn(svc["id"], url)
-        js_eval_fn(f"window.dispatchEvent(new CustomEvent('service-added',{{detail:{json.dumps(svc)}}}));")
         dialog.close()
+        # dialog.exec()のモーダルループ終了後にWebView生成・JSイベント発火
+        # 即時呼ぶとpywebviewスレッドと競合するためQTimerで遅延
+        QTimer.singleShot(100, lambda: create_view_fn(svc["id"], svc["url"]))
+        QTimer.singleShot(200, lambda: js_eval_fn(
+            f"window.dispatchEvent(new CustomEvent('service-added',{{detail:{json.dumps(svc)}}}))"
+        ))
 
     add_btn.clicked.connect(on_accept)
     name_input.setFocus()
