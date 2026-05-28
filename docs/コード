@@ -1,0 +1,10 @@
+名前：Discord
+URL：https://discord.com/app
+
+
+pkill -f vite 2>/dev/null
+fuser -k 5173/tcp 5174/tcp 2>/dev/null
+sleep 1
+npm run dev --prefix frontend &
+sleep 4
+python3 main.py

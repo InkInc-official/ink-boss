@@ -14,16 +14,7 @@ from config import DIALOG_STYLE, save_config
 
 
 def show_add_service_dialog(config: dict, js_eval_fn, create_view_fn, group_id: str = "") -> None:
-    """
-    サービス追加ダイアログを表示する。
-
-    Args:
-        config:         現在のconfig dict
-        js_eval_fn:     JSイベント発火用関数
-        create_view_fn: bridge._create_view(sid, url) 相当の関数
-        group_id:       初期選択グループID（任意）
-    """
-    groups = config.get("groups", [])
+    groups   = config.get("groups", [])
     gid_init = group_id or None
 
     dialog = QDialog()
@@ -57,13 +48,15 @@ def show_add_service_dialog(config: dict, js_eval_fn, create_view_fn, group_id: 
 
     btn_layout = QHBoxLayout()
     cancel_btn = QPushButton("キャンセル")
-    add_btn = QPushButton("追加")
+    add_btn    = QPushButton("追加")
     add_btn.setObjectName("addBtn")
     btn_layout.addWidget(cancel_btn)
     btn_layout.addWidget(add_btn)
     layout.addLayout(btn_layout)
 
-    cancel_btn.clicked.connect(dialog.close)
+    cancel_btn.clicked.connect(dialog.reject)
+
+    accepted = {"svc": None}
 
     def on_accept():
         name = name_input.text().strip()
@@ -79,14 +72,22 @@ def show_add_service_dialog(config: dict, js_eval_fn, create_view_fn, group_id: 
         }
         config["services"].append(svc)
         save_config(config)
-        dialog.close()
-        # dialog.exec()のモーダルループ終了後にWebView生成・JSイベント発火
-        # 即時呼ぶとpywebviewスレッドと競合するためQTimerで遅延
+        accepted["svc"] = svc
+        dialog.accept()
+
+    def on_finished():
+        svc = accepted["svc"]
+        if svc is None:
+            return
         QTimer.singleShot(100, lambda: create_view_fn(svc["id"], svc["url"]))
         QTimer.singleShot(200, lambda: js_eval_fn(
             f"window.dispatchEvent(new CustomEvent('service-added',{{detail:{json.dumps(svc)}}}))"
         ))
 
     add_btn.clicked.connect(on_accept)
+    # Enterキーでも確定できるように両フィールドのreturnPressedを接続
+    name_input.returnPressed.connect(on_accept)
+    url_input.returnPressed.connect(on_accept)
+    dialog.finished.connect(on_finished)
     name_input.setFocus()
     dialog.exec()

@@ -273,20 +273,61 @@ const fullPrompt = pageText
 | 問題 | 状況 | 備考 |
 |---|---|---|
 | Google検索結果のサイトが開かない | 未解決 | 原因不明 |
-| 日本語入力（IME入力欄） | 未解決 | WebView内のinput要素でのpreedit表示未確認 |
+| 日本語入力（IME入力欄） | 解決済み | WebView内のinput要素でのpreedit表示確認 |
 | タイトルバーが消えない | 解決済み | Mutter+xpropで安定 |
 | 設定コンポーネント化 | 未着手 | main.pyが肥大化している |
 
 ---
 
-## 12. 次のチャットでやること
+## 12. コンポーネント化構想（次の大作業）
+
+### 目標ファイル構成
+```
+~/InkTools/ink-boss/
+├── main.py              # エントリーポイントのみ（50行以内）
+├── ime.py               # _setup_ime（IME自動検出・プラグインリンク）
+├── config.py            # 定数・load_config・save_config
+├── bridge.py            # ViewBridge（シグナル・WebView管理）
+├── api.py               # InkBossAPI（JS↔Python橋渡し）
+├── window.py            # find_container・on_shown・on_resized・_win_id
+├── qt_worker.py         # 旧アーキテクチャの残骸（削除しない・bridge.py切り出し時の参考）
+└── dialogs/
+    ├── __init__.py
+    ├── settings.py      # 設定ダイアログ（最大・最優先）
+    ├── add_service.py   # サービス追加ダイアログ
+    ├── add_group.py     # グループ追加ダイアログ
+    └── context_menu.py  # コンテキストメニュー
+```
+
+### 切り出し順序（リスクが低い順）
+| 順番 | ファイル | 理由 | qt_worker参考 |
+|---|---|---|---|
+| 1 | `ime.py` | 完全独立・他に依存しない | 不要 |
+| 2 | `config.py` | 全体の基盤・小さい | 不要 |
+| 3 | `dialogs/settings.py` | 最大の効果・独立性高い | 不要 |
+| 4 | `bridge.py` | ViewBridge全体 | **必要** ← このタイミングでqt_worker.pyを見せる |
+| 5 | `api.py` | InkBossAPI全体 | 不要 |
+| 6 | `window.py` | on_shown等 | 不要 |
+
+### 作業ルール
+- **1ファイルずつ・承認制**で進める
+- 切り出し後は必ず動作確認してからGitにコミット
+- 既存ロジックは絶対に削除しない
+
+### qt_worker.pyについて
+旧アーキテクチャの残骸だが**削除しない**。
+`bridge.py`切り出し時に`WebViewManager`クラスの構造を参考にする。
+将来のマルチプロセス化の際に復活させる可能性あり。
+
+---
+
+## 13. 次のチャットでやること
 
 ### 優先度高
+- [ ] コンポーネント化（main.pyを分割・セクション12参照）
 - [ ] Google検索結果のサイトが開かない問題の調査
-- [ ] 日本語入力のpreedit（変換候補）表示確認
 
 ### 優先度中
-- [ ] 設定コンポーネント化（main.pyが肥大化）
 - [ ] Lite版のサービス登録数制限実装
 
 ### 将来の拡張
@@ -296,12 +337,13 @@ const fullPrompt = pageText
 
 ---
 
-## 13. 次のチャットに渡すファイル
+## 14. 次のチャットに渡すファイル
 
 - `main.py`
 - `WebViewArea.tsx`
 - `InkAide.tsx`
 - `Sidebar.tsx`
+- `Ink_Boss_引継ぎ書_v3.md`
 
 GitHubからも取得可能：
 ```bash
