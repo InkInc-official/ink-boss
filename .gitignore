@@ -11,3 +11,5 @@ src-tauri/
 *.sqlite
 src-tauri/
 .env
+build/
+ink-boss.spec
