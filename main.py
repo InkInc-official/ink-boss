@@ -364,9 +364,25 @@ def main():
         _orig_set(width)
     api.set_aide_width = _set_aide_width_patched
 
+    # DEBインストール版かどうかを自動判定
+    import os, http.server, socketserver, threading
+    _dist_dir = Path(__file__).parent / "frontend" / "dist"
+    if _dist_dir.exists():
+        # ランダムポートでローカルHTTPサーバーを立てる
+        os.chdir(str(_dist_dir))
+        _handler = http.server.SimpleHTTPRequestHandler
+        _handler.log_message = lambda *a: None  # ログ抑制
+        _httpd = socketserver.TCPServer(("127.0.0.1", 0), _handler)
+        _port  = _httpd.server_address[1]
+        threading.Thread(target=_httpd.serve_forever, daemon=True).start()
+        _url = f"http://127.0.0.1:{_port}/index.html"
+    else:
+        _url = "http://localhost:5174"
+    print(f"[WebView] url={_url}", flush=True)
+
     window = webview.create_window(
         "Ink Boss",
-        url="http://localhost:5174",
+        url=_url,
         js_api=api,
         width=1280,
         height=850,
