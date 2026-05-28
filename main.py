@@ -39,7 +39,8 @@ from config import load_config, save_config
 from bridge import ViewBridge
 from api    import InkBossAPI
 from window import on_shown, get_rect
-from auth   import verify, get_cached_key, save_license_key_to_config
+from auth    import verify, get_cached_key, save_license_key_to_config
+from updater import check_update, download_and_install, CURRENT_VERSION
 
 # QApplication
 qt_app = QApplication.instance() or QApplication(sys.argv)
@@ -65,6 +66,137 @@ def _set_aide_width(val: int) -> None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ロック画面（ライセンス未認証時）
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _check_and_show_update() -> None:
+    """アップデートがあればダイアログを表示する"""
+    from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar
+    from PySide6.QtCore import Qt, QThread, Signal
+
+    # バックグラウンドでチェック
+    import threading
+    result = {}
+
+    def _check():
+        result.update(check_update())
+
+    t = threading.Thread(target=_check, daemon=True)
+    t.start()
+    t.join(timeout=10)  # 最大10秒待つ
+
+    if not result.get("available"):
+        return
+
+    latest  = result["latest_version"]
+    dl_url  = result["download_url"]
+    notes   = result["release_notes"] or "詳細はGitHubをご確認ください。"
+
+    dialog = QDialog()
+    dialog.setWindowTitle("Ink Boss アップデート")
+    dialog.setMinimumWidth(420)
+    dialog.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+    dialog.setStyleSheet("""
+        QDialog { background-color: #080810; border: 1px solid rgba(255,255,255,0.1); border-radius: 16px; }
+        QLabel  { color: white; border: none; background: transparent; }
+        QPushButton#updateBtn {
+            background: rgba(100,200,255,0.12); border: 1px solid rgba(100,200,255,0.3);
+            border-radius: 10px; padding: 12px; color: rgba(100,200,255,0.9);
+            font-size: 14px; font-weight: bold;
+        }
+        QPushButton#updateBtn:hover { background: rgba(100,200,255,0.2); }
+        QPushButton#skipBtn {
+            background: transparent; border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px; padding: 12px; color: rgba(255,255,255,0.35); font-size: 13px;
+        }
+        QPushButton#skipBtn:hover { color: rgba(255,255,255,0.6); }
+        QProgressBar {
+            background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 6px; height: 8px; text-align: center;
+        }
+        QProgressBar::chunk { background: rgba(100,200,255,0.6); border-radius: 6px; }
+    """)
+
+    root = QVBoxLayout(dialog)
+    root.setContentsMargins(40, 36, 40, 36)
+    root.setSpacing(0)
+
+    title = QLabel("🎉  アップデートがあります")
+    title.setStyleSheet("font-size: 16px; font-weight: bold;")
+    title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    root.addWidget(title)
+    root.addSpacing(10)
+
+    ver_label = QLabel(f"v{CURRENT_VERSION}  →  v{latest}")
+    ver_label.setStyleSheet("color: rgba(255,255,255,0.45); font-size: 13px; font-family: monospace;")
+    ver_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    root.addWidget(ver_label)
+    root.addSpacing(16)
+
+    notes_label = QLabel(notes[:200] + ("..." if len(notes) > 200 else ""))
+    notes_label.setStyleSheet(
+        "color: rgba(255,255,255,0.4); font-size: 12px;"
+        "background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07);"
+        "border-radius: 8px; padding: 10px 12px;"
+    )
+    notes_label.setWordWrap(True)
+    root.addWidget(notes_label)
+    root.addSpacing(20)
+
+    progress = QProgressBar()
+    progress.setVisible(False)
+    progress.setFixedHeight(8)
+    root.addWidget(progress)
+
+    status_label = QLabel("")
+    status_label.setStyleSheet("color: rgba(255,255,255,0.4); font-size: 12px;")
+    status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    root.addWidget(status_label)
+    root.addSpacing(16)
+
+    btn_row = QHBoxLayout()
+    skip_btn   = QPushButton("後で")
+    update_btn = QPushButton("今すぐ更新")
+    skip_btn.setObjectName("skipBtn")
+    update_btn.setObjectName("updateBtn")
+    btn_row.addWidget(skip_btn)
+    btn_row.addWidget(update_btn)
+    root.addLayout(btn_row)
+
+    skip_btn.clicked.connect(dialog.reject)
+
+    def on_update():
+        if not dl_url:
+            status_label.setText("ダウンロードURLが見つかりません。GitHubを確認してください。")
+            return
+        update_btn.setEnabled(False)
+        skip_btn.setEnabled(False)
+        progress.setVisible(True)
+        progress.setRange(0, 100)
+        status_label.setText("ダウンロード中...")
+
+        def _progress(dl, total):
+            if total > 0:
+                pct = int(dl / total * 100)
+                progress.setValue(pct)
+                status_label.setText(f"ダウンロード中... {pct}%")
+            qt_app.processEvents()
+
+        import threading
+        def _do():
+            ok = download_and_install(dl_url, _progress)
+            if ok:
+                status_label.setText("✅ インストール完了。再起動してください。")
+                progress.setValue(100)
+            else:
+                status_label.setText("❌ ダウンロードに失敗しました。")
+                update_btn.setEnabled(True)
+                skip_btn.setEnabled(True)
+            qt_app.processEvents()
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    update_btn.clicked.connect(on_update)
+    dialog.exec()
+
+
 def _show_lock_screen(reason: str) -> None:
     """ライセンス未認証時のロック画面"""
     from PySide6.QtWidgets import (
@@ -214,6 +346,9 @@ def main():
         return
 
     print(f"[Auth] 認証OK (reason={auth_result['reason']}, cache={auth_result['from_cache']})", flush=True)
+
+    # ── アップデート確認 ────────────────────────
+    _check_and_show_update()
 
     # ── Ink Boss 起動 ───────────────────────────
     api = InkBossAPI(

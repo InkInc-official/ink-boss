@@ -10,3 +10,4 @@ src-tauri/
 *.db
 *.sqlite
 src-tauri/
+.env
