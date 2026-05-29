@@ -1,0 +1,9 @@
+dist/
+build/
+__pycache__/
+*.pyc
+*.spec
+dialogs/__pycache__/
+.env
+frontend/dist/
+frontend/node_modules/
