@@ -1,0 +1,23 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=JetBrains+Mono:wght@400;500&display=swap');
+
+* { box-sizing: border-box; -webkit-user-select: none; user-select: none; }
+input, textarea { -webkit-user-select: text; user-select: text; }
+
+html, body, #root {
+  height: 100%; width: 100%;
+  margin: 0; padding: 0;
+  overflow: hidden;
+  background: #080810;
+  color: #ffffff;
+  font-family: 'DM Sans', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-display { font-family: 'Bebas Neue', sans-serif; }
+.font-mono { font-family: 'JetBrains Mono', monospace; }
+
+.scrollbar-thin::-webkit-scrollbar { width: 3px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: #ffffff12; border-radius: 99px; }
+.scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #c0392b44; }
