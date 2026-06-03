@@ -1,26 +1,23 @@
-import { useState } from "react";
 import { useAppStore } from "../store";
 import InkAide from "./InkAide";
+import { useState } from "react";
+import inkBossIcon from "../assets/icon.png";
 
 export default function WebViewArea() {
   const { services, activeServiceId, hibernatedIds } = useAppStore();
   const activeService = services.find((s) => s.id === activeServiceId);
-  const isHibernated = activeServiceId ? hibernatedIds.has(activeServiceId) : false;
-  const showEmpty = !activeServiceId;
+  const isHibernated  = activeServiceId ? hibernatedIds.has(activeServiceId) : false;
+  const showEmpty     = !activeServiceId || isHibernated;
   const [aideOpen, setAideOpen] = useState(false);
-  const [aideOk, setAideOk] = useState(false);
+  const [aideOk,   setAideOk]   = useState(false);
+  const [iconError, setIconError] = useState(false);
 
   const handleReload   = () => { if (activeServiceId && !isHibernated) window.pywebview?.api?.reload_service(activeServiceId); };
   const handleClose    = () => window.pywebview?.api?.close_window();
   const handleMinimize = () => window.pywebview?.api?.minimize_window();
   const handleMaximize = () => window.pywebview?.api?.toggle_maximize();
 
-  // タイトルバーにURLを反映
-  if (activeService?.url) {
-    window.pywebview?.api?.update_title?.(activeService.url);
-  } else {
-    window.pywebview?.api?.update_title?.("Ink Boss");
-  }
+  window.pywebview?.api?.update_title?.(activeService?.url ?? "Ink Boss");
 
   const handleAideToggle = () => {
     const next = !aideOpen;
@@ -29,24 +26,25 @@ export default function WebViewArea() {
   };
 
   const TopBar = () => (
-    <div className="flex items-center h-10 bg-[#0a0a12] border-b border-white/5 px-4 gap-3 flex-shrink-0 cursor-default select-none"
-      onMouseDown={(e: any) => {
+    <div
+      className="flex items-center h-10 bg-[#0a0a12] border-b border-white/5 px-4 gap-3 flex-shrink-0 cursor-default select-none"
+      onMouseDown={(e: React.MouseEvent) => {
         if ((e.target as HTMLElement).tagName !== "BUTTON") {
           window.pywebview?.api?.drag_start?.();
-          const onUp = () => {
-            window.pywebview?.api?.drag_end?.();
-            window.removeEventListener("mouseup", onUp);
-          };
+          const onUp = () => { window.pywebview?.api?.drag_end?.(); window.removeEventListener("mouseup", onUp); };
           window.addEventListener("mouseup", onUp);
         }
-      }}>
+      }}
+    >
       <div className="flex items-center gap-1.5">
         <button onClick={handleClose}    className="w-3 h-3 rounded-full bg-white/20 hover:bg-red-500 transition-colors" />
         <button onClick={handleMinimize} className="w-3 h-3 rounded-full bg-white/15 hover:bg-yellow-400 transition-colors" />
         <button onClick={handleMaximize} className="w-3 h-3 rounded-full bg-white/10 hover:bg-green-400 transition-colors" />
       </div>
       <div className="flex-1 flex items-center justify-center">
-        <span className="text-white/20 text-xs font-mono">{showEmpty ? "Ink Boss" : activeService?.url}</span>
+        <span className="text-white/20 text-xs font-mono truncate max-w-md">
+          {showEmpty ? "Ink Boss" : activeService?.url}
+        </span>
       </div>
       <div className="flex items-center gap-2">
         {!showEmpty && (
@@ -70,12 +68,24 @@ export default function WebViewArea() {
         <TopBar />
         <div className="flex-1 flex flex-col items-center justify-center select-none">
           <div className="flex flex-col items-center gap-6">
-            <img src="/icon.png" alt="Ink Boss" className="w-24 h-24 object-cover rounded-2xl"
-              style={{ filter: "grayscale(100%) brightness(1.3)" }}
-              onError={(e) => { (e.target as HTMLImageElement).style.display="none"; }} />
+            {iconError ? (
+              <div className="w-24 h-24 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center">
+                <span className="font-display text-2xl tracking-[0.2em] text-white/40">IB</span>
+              </div>
+            ) : (
+              <img
+                src={inkBossIcon}
+                alt="Ink Boss"
+                className="w-24 h-24 object-cover rounded-2xl"
+                style={{ filter: "grayscale(100%) brightness(1.3)" }}
+                onError={() => setIconError(true)}
+              />
+            )}
             <div className="text-center space-y-2">
               <p className="font-display text-3xl tracking-[0.25em] text-white/70">INK BOSS</p>
-              <p className="text-sm text-white/35 font-light leading-relaxed">左のサイドバーからサービスを選択するか<br />「+」でサービスを追加してください</p>
+              <p className="text-sm text-white/35 font-light leading-relaxed">
+                左のサイドバーからサービスを選択するか<br />「+」でサービスを追加してください
+              </p>
             </div>
           </div>
         </div>
@@ -88,7 +98,8 @@ export default function WebViewArea() {
       <TopBar />
       <div className="flex flex-1 overflow-hidden">
         <div className="flex-1 bg-transparent" id="webview-area" />
-        <InkAide open={aideOpen} onSuccess={() => setAideOk(true)} onClose={() => { setAideOpen(false); setAideOk(false); window.pywebview?.api?.set_aide_width?.(0); }} />
+        <InkAide open={aideOpen} onSuccess={() => setAideOk(true)}
+          onClose={() => { setAideOpen(false); setAideOk(false); window.pywebview?.api?.set_aide_width?.(0); }} />
       </div>
     </div>
   );

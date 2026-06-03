@@ -1,9 +1,9 @@
 import { useEffect } from "react";
 import Sidebar from "./components/Sidebar";
 import WebViewArea from "./components/WebViewArea";
+import WindowsOverlay from "./components/WindowsOverlay";
 import { useAppStore } from "./store";
 
-// グローバルにactiveIdを保持（モーダルから参照するため）
 declare global {
   interface Window {
     __inkBossActiveId: string | null;
@@ -23,7 +23,6 @@ export default function App() {
     }
   }, [loadConfig]);
 
-  // activeServiceIdをグローバルに同期
   useEffect(() => {
     window.__inkBossActiveId = activeServiceId;
   }, [activeServiceId]);
@@ -40,6 +39,8 @@ export default function App() {
     <div className="flex h-screen w-screen overflow-hidden bg-[#080810] text-white">
       <Sidebar />
       <WebViewArea />
+      {/* Windows(EdgeChromium)環境でのJSオーバーレイ */}
+      <WindowsOverlay />
     </div>
   );
 }

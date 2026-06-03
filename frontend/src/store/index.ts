@@ -33,6 +33,7 @@ interface AppStore {
   addService: (name: string, url: string, groupId?: string) => Promise<void>;
   updateService: (id: string, updates: Partial<Service>) => Promise<void>;
   removeService: (id: string) => Promise<void>;
+  _removeServiceFromStore: (id: string) => void;
   moveService: (id: string, groupId: string) => Promise<void>;
   copyService: (id: string, groupId: string) => Promise<void>;
   hibernateService: (id: string) => Promise<void>;
@@ -64,9 +65,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       const config = await api().get_config();
       const hibernatedIds = await api().get_hibernated_ids();
+      // 既存config.jsonのグループがcollapsed:falseのままの場合に備え
+      // 起動時は全グループをcollapsed:trueに統一する
+      const groups: Group[] = (config.groups ?? []).map((g: Group) => ({ ...g, collapsed: true }));
       set({
         services: config.services ?? [],
-        groups: config.groups ?? [],
+        groups,
         hibernatedIds: new Set(hibernatedIds),
         config: { ...defaultConfig, ...config },
         loaded: true,
@@ -102,7 +106,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   removeService: async (id) => {
+    // Windows: api.remove_serviceがservice-removedイベントを発火 → このメソッドは呼ばれない
+    // Linux/store直接: APIを呼んでからstoreを更新
     await api().remove_service(id);
+    set((s) => ({
+      services: s.services.filter((sv) => sv.id !== id),
+      activeServiceId: s.activeServiceId === id ? null : s.activeServiceId,
+    }));
+  },
+
+  // store内部のみ更新（APIを呼ばない）。service-removedイベント受信時に使う
+  _removeServiceFromStore: (id: string) => {
     set((s) => ({
       services: s.services.filter((sv) => sv.id !== id),
       activeServiceId: s.activeServiceId === id ? null : s.activeServiceId,
@@ -167,7 +181,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   toggleGroupCollapsed: (id) => {
+    // setで更新してから新しい値を取得
     set((s) => ({ groups: s.groups.map((g) => g.id === id ? { ...g, collapsed: !g.collapsed } : g) }));
+    const newCollapsed = get().groups.find((g) => g.id === id)?.collapsed ?? false;
+    api()?.update_group_collapsed?.(id, newCollapsed);
   },
 
   updateLLMConfig: async (llmUpdates) => {

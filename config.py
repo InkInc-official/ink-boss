@@ -42,6 +42,7 @@ DEFAULT_CONFIG: dict = {
         "geminiApiKey": "",
     },
     "hibernate_minutes": 10,
+    "knowledge": "",
     "services": [],
     "groups": [],
 }
