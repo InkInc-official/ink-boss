@@ -12,7 +12,7 @@ interface Props {
   onHibernate: () => void;
   onWake: () => void;
   onEdit: () => void;
-  onDelete: () => void;
+  onDelete: () => void | Promise<void>;
 }
 
 export default function ContextMenu({ x, y, service, groups, isHibernated, onClose, onMove, onCopy, onHibernate, onWake, onEdit, onDelete }: Props) {
@@ -20,22 +20,21 @@ export default function ContextMenu({ x, y, service, groups, isHibernated, onClo
   const [showConfirm, setShowConfirm] = useState(false);
 
   useEffect(() => {
-    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose(); };
+    const handler = (e: MouseEvent) => {
+      if (showConfirm) return;
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [onClose]);
+  }, [onClose, showConfirm]);
 
-  // ConfirmDialog表示時: サービスウィンドウ(HWND)をすべて隠す
-  // → Win32子ウィンドウはCSS z-indexを無視してDOMの上に描画されるため
   const openConfirm = () => {
-    // ConfirmDialogはzIndex:2147483647なのでHWND退避不要
     setShowConfirm(true);
   };
 
-  const handleConfirm = () => {
+  const handleConfirm = async () => {
     setShowConfirm(false);
-    // onDeleteの後にrestore_active_hwndはWindowsOverlay側で管理
-    onDelete();
+    await onDelete();
   };
 
   const handleCancel = () => {

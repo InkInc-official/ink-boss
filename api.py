@@ -395,11 +395,10 @@ class InkBossAPI:
         if platform.system() == "Windows":
             from bridge import js_eval
             import json
-            # サイドバー上の右クリックなのでHWND退避は不要
             payload = json.dumps({
                 "sid": sid, "name": name, "x": x, "y": y,
                 "isHib": bool(is_hib), "groups": json.loads(groups_json) if groups_json else []
-            })
+            }, ensure_ascii=False)
             js_eval(f"window.dispatchEvent(new CustomEvent('show-context-menu',{{detail:{payload}}}))")
         else:
             from config import SIDEBAR_W

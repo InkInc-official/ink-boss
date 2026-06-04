@@ -116,6 +116,19 @@ export default function WindowsOverlay() {
     setGroupMenu(null);
   }, []);
 
+  const openEditService = useCallback((svc: Service) => {
+    setEditService({ id: svc.id, name: svc.name, url: svc.url ?? "" });
+    setEditName(svc.name);
+    setEditUrl(svc.url ?? "");
+  }, []);
+
+  const removeServiceViaApi = useCallback(async (sid: string) => {
+    const api = window.pywebview?.api;
+    console.log("[onDelete] calling remove_service:", sid);
+    console.log("[onDelete] pywebview api exists:", Boolean(api));
+    await api?.remove_service?.(sid);
+  }, []);
+
   useEffect(() => {
     const onContextMenu = (e: CustomEvent) => {
       const { sid, x, y, isHib } = e.detail;
@@ -135,7 +148,6 @@ export default function WindowsOverlay() {
     };
     const onAddGroup = () => { closeAll(); setShowAddGroup(true); setAddGroupName(""); };
     const onSettings = () => { closeAll(); setShowSettings(true); };
-
     window.addEventListener("show-context-menu",       onContextMenu as EventListener);
     window.addEventListener("show-group-context-menu", onGroupMenu   as EventListener);
     window.addEventListener("show-add-service-dialog", onAddService  as EventListener);
@@ -171,17 +183,13 @@ export default function WindowsOverlay() {
           onHibernate={async () => { closeAll(); await hibernateService(serviceMenu.service.id); }}
           onWake={async () => { closeAll(); await wakeService(serviceMenu.service.id); }}
           onEdit={() => {
-            const svc = serviceMenu.service;
-            setEditService({ id: svc.id, name: svc.name, url: (svc as any).url ?? "" });
-            setEditName(svc.name);
-            setEditUrl((svc as any).url ?? "");
+            openEditService(serviceMenu.service);
             closeAll();
           }}
           onDelete={async () => {
             const sid = serviceMenu.service.id;
             closeAll();
-            console.log("[onDelete] calling remove_service:", sid);
-            await window.pywebview?.api?.remove_service?.(sid);
+            await removeServiceViaApi(sid);
           }}
         />
       )}
