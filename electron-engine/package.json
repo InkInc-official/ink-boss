@@ -1,0 +1,14 @@
+{
+  "name": "ink-boss-electron-engine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ink Boss dual-engine helper (B1 overlay follow, fixed userData for Discord sessions)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron . --no-sandbox",
+    "dev": "electron . --no-sandbox --enable-logging"
+  },
+  "devDependencies": {
+    "electron": "^34.0.0"
+  }
+}

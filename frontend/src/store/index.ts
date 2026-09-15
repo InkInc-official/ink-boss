@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Service, Group, AppConfig, LLMConfig } from "../types";
+import type { Service, Group, AppConfig, LLMConfig, ServiceEngine } from "../types";
 
 const defaultConfig: AppConfig = {
   version: "2.0.0",
@@ -30,13 +30,16 @@ interface AppStore {
   setHibernated: (id: string, val: boolean) => void;
   setWaking: (id: string, val: boolean) => void;
 
-  addService: (name: string, url: string, groupId?: string) => Promise<void>;
+  addService: (name: string, url: string, groupId?: string, engine?: ServiceEngine) => Promise<void>;
   updateService: (id: string, updates: Partial<Service>) => Promise<void>;
   removeService: (id: string) => Promise<void>;
+  /** Python 側で既に削除済みのときのローカルのみ更新 */
+  dropServiceLocal: (id: string) => void;
   moveService: (id: string, groupId: string) => Promise<void>;
   copyService: (id: string, groupId: string) => Promise<void>;
   hibernateService: (id: string) => Promise<void>;
   wakeService: (id: string) => Promise<void>;
+  reorderServices: (ids: string[]) => Promise<void>;
 
   addGroup: (name: string) => Promise<void>;
   updateGroup: (id: string, name: string) => Promise<void>;
@@ -61,35 +64,49 @@ export const useAppStore = create<AppStore>((set, get) => ({
   loaded: false,
 
   loadConfig: async () => {
-    try {
-      const config = await api().get_config();
-      const hibernatedIds = await api().get_hibernated_ids();
-      set({
-        services: config.services ?? [],
-        groups: config.groups ?? [],
-        hibernatedIds: new Set(hibernatedIds),
-        config: { ...defaultConfig, ...config },
-        loaded: true,
-      });
-    } catch {
-      set({ loaded: true });
+    // 起動直後は pywebviewready が発火しても js_api 側の準備が
+    // 間に合っていないことがある（最初の1回だけ失敗するレース）。
+    // 無言で諦めるとサイドバーが永久に空のままになるため、数回リトライする。
+    const MAX_ATTEMPTS = 5;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const config = await api().get_config();
+        const hibernatedIds = await api().get_hibernated_ids();
+        set({
+          services: config.services ?? [],
+          groups: config.groups ?? [],
+          hibernatedIds: new Set(hibernatedIds),
+          config: { ...defaultConfig, ...config },
+          loaded: true,
+        });
+        return;
+      } catch (e) {
+        console.warn(`[loadConfig] attempt ${attempt}/${MAX_ATTEMPTS} failed`, e);
+        if (attempt === MAX_ATTEMPTS) {
+          set({ loaded: true });
+        } else {
+          await new Promise((r) => setTimeout(r, 300 * attempt));
+        }
+      }
     }
   },
 
   setActiveService: (id) => set({ activeServiceId: id }),
-  setHibernated: (id, val) => set((s) => {
-    const next = new Set(s.hibernatedIds);
-    val ? next.add(id) : next.delete(id);
-    return { hibernatedIds: next };
-  }),
-  setWaking: (id, val) => set((s) => {
-    const next = new Set(s.wakingIds);
-    val ? next.add(id) : next.delete(id);
-    return { wakingIds: next };
-  }),
+  setHibernated: (id, val) =>
+    set((s) => {
+      const next = new Set(s.hibernatedIds);
+      val ? next.add(id) : next.delete(id);
+      return { hibernatedIds: next };
+    }),
+  setWaking: (id, val) =>
+    set((s) => {
+      const next = new Set(s.wakingIds);
+      val ? next.add(id) : next.delete(id);
+      return { wakingIds: next };
+    }),
 
-  addService: async (name, url, groupId) => {
-    const service = await api().add_service(name, url, groupId);
+  addService: async (name, url, groupId, engine = "qt") => {
+    const service = await api().add_service(name, url, groupId, engine);
     set((s) => ({
       services: [...s.services, service],
       hibernatedIds: new Set([...s.hibernatedIds, service.id]),
@@ -98,11 +115,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   updateService: async (id, updates) => {
     await api().update_service(id, updates);
-    set((s) => ({ services: s.services.map((sv) => sv.id === id ? { ...sv, ...updates } : sv) }));
+    set((s) => ({
+      services: s.services.map((sv) => (sv.id === id ? { ...sv, ...updates } : sv)),
+    }));
   },
 
   removeService: async (id) => {
     await api().remove_service(id);
+    get().dropServiceLocal(id);
+  },
+
+  dropServiceLocal: (id) => {
     set((s) => ({
       services: s.services.filter((sv) => sv.id !== id),
       activeServiceId: s.activeServiceId === id ? null : s.activeServiceId,
@@ -111,7 +134,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   moveService: async (id, groupId) => {
     await api().move_service(id, groupId);
-    set((s) => ({ services: s.services.map((sv) => sv.id === id ? { ...sv, groupId } : sv) }));
+    set((s) => ({
+      services: s.services.map((sv) => (sv.id === id ? { ...sv, groupId } : sv)),
+    }));
   },
 
   copyService: async (id, groupId) => {
@@ -146,6 +171,23 @@ export const useAppStore = create<AppStore>((set, get) => ({
     });
   },
 
+  reorderServices: async (ids) => {
+    await api().reorder_services?.(ids);
+    set((s) => {
+      const map = new Map(s.services.map((sv) => [sv.id, sv]));
+      const ordered: Service[] = [];
+      for (const id of ids) {
+        const sv = map.get(id);
+        if (sv) {
+          ordered.push(sv);
+          map.delete(id);
+        }
+      }
+      for (const sv of map.values()) ordered.push(sv);
+      return { services: ordered };
+    });
+  },
+
   addGroup: async (name) => {
     const group = await api().add_group(name);
     set((s) => ({ groups: [...s.groups, group] }));
@@ -153,7 +195,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   updateGroup: async (id, name) => {
     await api().update_group(id, name);
-    set((s) => ({ groups: s.groups.map((g) => g.id === id ? { ...g, name } : g) }));
+    set((s) => ({ groups: s.groups.map((g) => (g.id === id ? { ...g, name } : g)) }));
   },
 
   removeGroup: async (id, deleteServices) => {
@@ -162,12 +204,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
       groups: s.groups.filter((g) => g.id !== id),
       services: deleteServices
         ? s.services.filter((sv) => sv.groupId !== id)
-        : s.services.map((sv) => sv.groupId === id ? { ...sv, groupId: undefined } : sv),
+        : s.services.map((sv) =>
+            sv.groupId === id ? { ...sv, groupId: undefined } : sv,
+          ),
     }));
   },
 
   toggleGroupCollapsed: (id) => {
-    set((s) => ({ groups: s.groups.map((g) => g.id === id ? { ...g, collapsed: !g.collapsed } : g) }));
+    set((s) => ({
+      groups: s.groups.map((g) => (g.id === id ? { ...g, collapsed: !g.collapsed } : g)),
+    }));
   },
 
   updateLLMConfig: async (llmUpdates) => {

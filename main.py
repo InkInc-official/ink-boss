@@ -31,16 +31,19 @@ for _flag in _chromium_flags:
 # Qt / pywebview
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 import webview
+import json # ここを追加
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt
 
 from config import load_config, save_config
 from bridge import ViewBridge
 from api    import InkBossAPI
-from window import on_shown, get_rect
-from auth    import verify, get_cached_key, save_license_key_to_config
+from window import on_shown, get_rect, get_screen_rect
+from electron_bridge import ElectronEngine
 from updater import check_update, download_and_install, CURRENT_VERSION
+from electron_bridge import ElectronEngine
 
 # QApplication
 qt_app = QApplication.instance() or QApplication(sys.argv)
@@ -50,7 +53,12 @@ if icon_path.exists():
 
 # 設定・ブリッジ
 config = load_config()
+print(f"[main] Config loaded after load_config(): {json.dumps(config, ensure_ascii=False)}", flush=True)
 bridge = ViewBridge(qt_app, config)
+
+# 第15章: Electron 常駐ヘルパー（失敗しても Qt のみで継続）
+electron_engine = ElectronEngine()
+bridge.electron = electron_engine
 
 # Aide幅（set_aide_widthで更新される）
 _aide_width = 0
@@ -113,7 +121,6 @@ def _check_and_show_update() -> None:
         }
         QProgressBar::chunk { background: rgba(100,200,255,0.6); border-radius: 6px; }
     """)
-
     root = QVBoxLayout(dialog)
     root.setContentsMargins(40, 36, 40, 36)
     root.setSpacing(0)
@@ -197,158 +204,15 @@ def _check_and_show_update() -> None:
     dialog.exec()
 
 
-def _show_lock_screen(reason: str) -> None:
-    """ライセンス未認証時のロック画面"""
-    from PySide6.QtWidgets import (
-        QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton,
-    )
-    from PySide6.QtCore import Qt
-    from PySide6.QtGui import QFont
-    from auth import verify, save_license_key_to_config
-    import subprocess
-
-    REASON_MSG = {
-        "invalid_key":  "キーが無効です。正しいキーを入力してください。",
-        "inactive":     "このライセンスは無効化されています。\n所長にお問い合わせください。",
-        "machine_limit":"登録台数の上限（2台）に達しています。\n所長にお問い合わせください。",
-        "offline":      "サーバーに接続できませんでした。\nネットワーク接続を確認してください。",
-        "error":        "認証中にエラーが発生しました。",
-    }
-    msg = REASON_MSG.get(reason, "")
-
-    dialog = QDialog()
-    dialog.setWindowTitle("Ink Boss")
-    dialog.setMinimumWidth(460)
-    dialog.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
-    dialog.setStyleSheet("""
-        QDialog {
-            background-color: #080810;
-            border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 16px;
-        }
-        QLabel { color: white; border: none; background: transparent; }
-        QLineEdit {
-            background: rgba(255,255,255,0.05);
-            border: 1px solid rgba(255,255,255,0.15);
-            border-radius: 10px;
-            padding: 14px 16px;
-            color: white;
-            font-size: 15px;
-            letter-spacing: 2px;
-        }
-        QLineEdit:focus { border: 1px solid rgba(255,255,255,0.35); }
-        QPushButton#authBtn {
-            background: rgba(255,255,255,0.08);
-            border: 1px solid rgba(255,255,255,0.2);
-            border-radius: 10px;
-            padding: 14px;
-            color: white;
-            font-size: 14px;
-            font-weight: bold;
-        }
-        QPushButton#authBtn:hover { background: rgba(255,255,255,0.13); }
-        QPushButton#authBtn:disabled { opacity: 0.35; }
-    """)
-
-    root = QVBoxLayout(dialog)
-    root.setContentsMargins(48, 44, 48, 44)
-    root.setSpacing(0)
-
-    # タイトル
-    title = QLabel("🖊️  Ink Boss")
-    title.setFont(QFont("monospace", 22, QFont.Weight.Bold))
-    title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    root.addWidget(title)
-    root.addSpacing(12)
-
-    # 説明
-    desc = QLabel("ご利用にはライセンスキーが必要です。\n所長より発行されたキーを入力してください。")
-    desc.setStyleSheet("color: rgba(255,255,255,0.45); font-size: 13px;")
-    desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    desc.setWordWrap(True)
-    root.addWidget(desc)
-    root.addSpacing(24)
-
-    # エラー表示（エラー時のみ）
-    err_label = QLabel(msg)
-    err_label.setStyleSheet(
-        "color: rgba(240,90,90,0.9); font-size: 12px;"
-        "background: rgba(240,90,90,0.1); border: 1px solid rgba(240,90,90,0.3);"
-        "border-radius: 8px; padding: 10px 14px;"
-    )
-    err_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    err_label.setWordWrap(True)
-    err_label.setVisible(bool(msg))
-    root.addWidget(err_label)
-    if msg:
-        root.addSpacing(16)
-
-    # キー入力
-    key_input = QLineEdit()
-    key_input.setPlaceholderText("INK-XXXX-XXXX-XXXX")
-    key_input.setText(config.get("license_key", ""))
-    key_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    root.addWidget(key_input)
-    root.addSpacing(20)
-
-    # 認証ボタン
-    auth_btn = QPushButton("認証する")
-    auth_btn.setObjectName("authBtn")
-    root.addWidget(auth_btn)
-    root.addSpacing(10)
-
-    status_label = QLabel("")
-    status_label.setStyleSheet("color: rgba(255,255,255,0.45); font-size: 12px;")
-    status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    root.addWidget(status_label)
-
-    def on_auth():
-        key = key_input.text().strip()
-        if not key:
-            err_label.setText("キーを入力してください")
-            err_label.setVisible(True)
-            return
-        auth_btn.setEnabled(False)
-        status_label.setText("認証中...")
-        qt_app.processEvents()
-        result = verify(key)
-        if result["valid"]:
-            save_license_key_to_config(config, key)
-            save_config(config)
-            status_label.setText("✅ 認証成功。Ink Bossを起動します...")
-            qt_app.processEvents()
-            dialog.accept()
-            subprocess.Popen([sys.executable] + sys.argv)
-        else:
-            auth_btn.setEnabled(True)
-            reason_map = {
-                "invalid_key":  "キーが無効です。正しいキーを入力してください。",
-                "inactive":     "このライセンスは無効化されています。所長にお問い合わせください。",
-                "machine_limit":"登録台数の上限（2台）に達しています。所長にお問い合わせください。",
-                "offline":      "サーバーに接続できません。ネットワークを確認してください。",
-            }
-            err_label.setText(reason_map.get(result["reason"], "認証に失敗しました。"))
-            err_label.setVisible(True)
-            status_label.setText("")
-
-    auth_btn.clicked.connect(on_auth)
-    key_input.returnPressed.connect(on_auth)
-    dialog.exec()
-
-
 def main():
-    # ── ライセンス認証 ──────────────────────────
-    license_key = config.get("license_key", "").strip()
-    auth_result = verify(license_key) if license_key else {"valid": False, "reason": "no_key", "from_cache": False}
-
-    if not auth_result["valid"]:
-        _show_lock_screen(auth_result["reason"])
-        return
-
-    print(f"[Auth] 認証OK (reason={auth_result['reason']}, cache={auth_result['from_cache']})", flush=True)
-
     # ── アップデート確認 ────────────────────────
     _check_and_show_update()
+
+    # ── Electron ヘルパー常駐（第15.4章） ──
+    try:
+        electron_engine.start()
+    except Exception as e:
+        print(f"[main] ElectronEngine.start failed (Qt only): {e}", flush=True)
 
     # ── Ink Boss 起動 ───────────────────────────
     api = InkBossAPI(
@@ -356,7 +220,11 @@ def main():
         bridge=bridge,
         get_rect_fn=get_rect,
         aide_width_getter=_get_aide_width,
+        electron=electron_engine,
+        get_screen_rect_fn=get_screen_rect,
     )
+    # 終了は bridge シグナル経由で Qt メインスレッド実行
+    bridge.set_shutdown_handler(api._shutdown_for_exit)
     _orig_set = api.set_aide_width
     def _set_aide_width_patched(width):
         global _aide_width
@@ -364,15 +232,44 @@ def main():
         _orig_set(width)
     api.set_aide_width = _set_aide_width_patched
 
+    # Qtアプリケーションのアクティブ状態変更を監視
+    def _on_application_state_changed(state):
+        # QApplicationは既にインポートされている
+        # Qtは既にインポートされている
+        # Qt.ApplicationActive は、ウィンドウがフォアグラウンドにある状態
+        if state == Qt.ApplicationState.ApplicationActive:
+            if electron_engine and electron_engine.is_available() and electron_engine.active_sid:
+                print(f"[main] App active. Showing Electron '{electron_engine.active_sid}'.", flush=True)
+                # api.show_service は ElectronService 側で show を呼ぶのでこれを使う
+                # ただし、api.show_service は bounds の計算も伴うため、Qt側の main_window が active でないとダメ
+                # 現状は main_window がまだ生成されていないか、bounds が未計算の場合があるので、
+                # ElectronEngine に show_only_sid のようなメソッドを追加する方が確実
+                # ただし、今回は応急処置としてダミーのboundsを渡し、ElectronEngine 側で無視させる
+                electron_engine.show(electron_engine.active_sid, "", 0, 0, 0, 0) # ダミーのbounds
+        # Qt.ApplicationInactive は、ウィンドウがバックグラウンドにある状態
+        elif state == Qt.ApplicationState.ApplicationInactive:
+            if electron_engine and electron_engine.is_available() and electron_engine.active_sid:
+                print(f"[main] App inactive. Hiding all Electron windows.", flush=True)
+                electron_engine.hide_all() # 全てのElectronウィンドウを非表示にする
+
+    qt_app.applicationStateChanged.connect(_on_application_state_changed)
+    print("[main] applicationStateChanged listener connected.", flush=True)
+
     # DEBインストール版かどうかを自動判定
-    import os, http.server, socketserver, threading
+    import os, http.server, socketserver, threading, atexit
     _dist_dir = Path(__file__).parent / "frontend" / "dist"
+    _httpd = None
     if _dist_dir.exists():
         # ランダムポートでローカルHTTPサーバーを立てる
+        # ThreadingMixIn 必須（仕様書）
+        class _ThreadedHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+            allow_reuse_address = True
+            daemon_threads = True
+
         os.chdir(str(_dist_dir))
         _handler = http.server.SimpleHTTPRequestHandler
         _handler.log_message = lambda *a: None  # ログ抑制
-        _httpd = socketserver.TCPServer(("127.0.0.1", 0), _handler)
+        _httpd = _ThreadedHTTPServer(("127.0.0.1", 0), _handler)
         _port  = _httpd.server_address[1]
         threading.Thread(target=_httpd.serve_forever, daemon=True).start()
         _url = f"http://127.0.0.1:{_port}/index.html"
@@ -380,6 +277,7 @@ def main():
         _url = "http://localhost:5174"
     print(f"[WebView] url={_url}", flush=True)
 
+    # A1: frameless=True → OS タイトルバーなし。操作は React ●●● / TopBar ドラッグ
     window = webview.create_window(
         "Ink Boss",
         url=_url,
@@ -388,14 +286,79 @@ def main():
         height=850,
         min_size=(800, 600),
         background_color="#080810",
+        frameless=True,
+        easy_drag=False,
     )
-    window.events.shown += lambda: on_shown(
-        window=window,
-        bridge=bridge,
-        icon_path=icon_path,
-        aide_width_getter=_get_aide_width,
-    )
+    def _on_shown():
+        on_shown(
+            window=window,
+            bridge=bridge,
+            icon_path=icon_path,
+            aide_width_getter=_get_aide_width,
+        )
+        # 自動クローズ（検証用）: INK_BOSS_AUTO_CLOSE_SEC=2 python3 main.py
+        # threading.Timer を使う（shown コールバックは Qt メインでないことがある）
+        import os as _os
+        import threading as _th
+        _sec = _os.environ.get("INK_BOSS_AUTO_CLOSE_SEC", "").strip()
+        if _sec:
+            try:
+                delay_s = max(0.5, float(_sec))
+            except ValueError:
+                delay_s = 2.0
+            print(f"[Close] AUTO_CLOSE armed: {delay_s}s (threading.Timer)", flush=True)
+            _th.Timer(delay_s, lambda: api.close_window()).start()
+
+    window.events.shown += _on_shown
+
+    # ウィンドウが閉じられたとき（destroy 後）の保険ログ
+    def _on_closed():
+        print("[Close] webview window closed event", flush=True)
+
+    try:
+        window.events.closed += _on_closed
+    except Exception:
+        pass
+
+    # atexit は「すでに shutdown 済みなら即 return」前提。二重ハング防止。
+    def _atexit_shutdown():
+        print("[Close] atexit shutdown", flush=True)
+        try:
+            electron_engine.shutdown(timeout=2.0)
+        except Exception as e:
+            print(f"[Close] atexit electron: {e}", flush=True)
+        try:
+            if _httpd is not None:
+                _httpd.shutdown()
+        except Exception:
+            pass
+
+    atexit.register(_atexit_shutdown)
+
+    print("[main] webview.start entering…", flush=True)
     webview.start(gui="qt")
+    print("[main] webview.start returned", flush=True)
+
+    # start() が返ったあと、子プロセスや非 daemon スレッドでハングしないよう片付ける
+    try:
+        electron_engine.shutdown(timeout=2.0)
+    except Exception as e:
+        print(f"[main] post-start electron shutdown: {e}", flush=True)
+    try:
+        if _httpd is not None:
+            _httpd.shutdown()
+    except Exception:
+        pass
+
+    print("[main] clean exit path — returning from main()", flush=True)
+    # それでも残る場合の最終手段（数百ms以内）
+    def _final_exit():
+        import time
+        time.sleep(0.4)
+        print("[main] final os._exit(0)", flush=True)
+        os._exit(0)
+
+    threading.Thread(target=_final_exit, daemon=True).start()
 
 
 if __name__ == "__main__":

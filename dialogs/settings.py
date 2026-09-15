@@ -2,7 +2,7 @@
 dialogs/settings.py - 設定ダイアログ
 Ink Boss / Ink Inc.
 
-ViewBridgeから呼ばれる設定画面（一般・AI/LLM・データ の3タブ）。
+ViewBridgeから呼ばれる設定画面（一般・AI/LLM・データ・About の4タブ）。
 """
 
 import json
@@ -16,7 +16,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 from config import DIALOG_STYLE, save_config
-from auth   import verify, get_cached_key, save_license_key_to_config
+from updater import CURRENT_VERSION
+
+# 非モーダル(.show())のダイアログはPython側の参照が切れるとGCされて
+# 消えてしまうため、開いている間はここで保持する。
+_open_dialogs: list = []
 
 
 def show_settings_dialog(config: dict, js_eval_fn) -> None:
@@ -147,97 +151,8 @@ def show_settings_dialog(config: dict, js_eval_fn) -> None:
     know_save.clicked.connect(on_know_save)
     gen_l.addWidget(know_save)
     gen_l.addWidget(know_save_msg)
-    # ────────────────────────────────────
-    # 認証キー
-    # ────────────────────────────────────
-    gen_l.addSpacing(12)
-    auth_lbl = QLabel("認証キー")
-    auth_lbl.setStyleSheet(
-        "color: rgba(255,255,255,0.35); font-size: 10px; font-family: monospace; letter-spacing: 1px;"
-    )
-    gen_l.addWidget(auth_lbl)
-    auth_desc = QLabel("Ink Bossのライセンスキーです。退所時に無効化されます。")
-    auth_desc.setStyleSheet("color: rgba(255,255,255,0.3); font-size: 11px;")
-    auth_desc.setWordWrap(True)
-    gen_l.addWidget(auth_desc)
-
-    current_key = get_cached_key() or config.get("license_key", "")
-    key_frame = QFrame()
-    key_frame.setObjectName("card")
-    key_frame_l = QHBoxLayout(key_frame)
-    key_frame_l.setContentsMargins(12, 10, 12, 10)
-
-    key_display = QLabel(current_key if current_key else "未認証")
-    key_display.setStyleSheet(
-        "font-family: monospace; font-size: 13px; letter-spacing: 2px;"
-        + ("color: rgba(100,255,150,0.9);" if current_key else "color: rgba(255,255,255,0.3);")
-    )
-    key_frame_l.addWidget(key_display)
-    key_frame_l.addStretch()
-
-    copy_btn = QPushButton("コピー")
-    copy_btn.setFixedWidth(70)
-    copy_btn.setEnabled(bool(current_key))
-
-    def on_copy_key():
-        QApplication.clipboard().setText(current_key)
-        copy_btn.setText("✓")
-        QTimer.singleShot(1500, lambda: copy_btn.setText("コピー"))
-
-    copy_btn.clicked.connect(on_copy_key)
-    key_frame_l.addWidget(copy_btn)
-    gen_l.addWidget(key_frame)
-
-    # キー変更ボタン
-    change_key_btn = QPushButton("キーを変更する")
-    change_key_btn.setStyleSheet(
-        "QPushButton{border:none;color:rgba(255,255,255,0.35);font-size:11px;padding:4px;background:transparent;}"
-        "QPushButton:hover{color:rgba(255,255,255,0.6);}"
-    )
-    change_key_msg = QLabel("")
-    change_key_msg.setStyleSheet("color: rgba(100,255,150,0.7); font-size: 11px;")
-
-    def on_change_key():
-        import subprocess, sys
-        new_key, ok = QInputDialog.getText(
-            dialog, "キーを変更",
-            "新しいライセンスキーを入力してください：",
-            QLineEdit.EchoMode.Normal,
-            current_key,
-        )
-        if not ok or not new_key.strip():
-            return
-        change_key_btn.setEnabled(False)
-        change_key_msg.setText("認証中...")
-
-        result = verify(new_key.strip())
-        if result["valid"]:
-            save_license_key_to_config(config, new_key.strip())
-            save_config(config)
-            QMessageBox.information(
-                dialog, "認証成功",
-                "ライセンスキーを更新しました。\nInk Bossを再起動します。"
-            )
-            subprocess.Popen([sys.executable] + sys.argv)
-        else:
-            reason_map = {
-                "invalid_key":  "キーが無効です。正しいキーを入力してください。",
-                "inactive":     "このキーは無効化されています。\n所長にお問い合わせください。",
-                "machine_limit":"登録台数の上限（2台）に達しています。\n所長にお問い合わせください。",
-                "offline":      "サーバーに接続できません。\nネットワークを確認してください。",
-            }
-            msg = reason_map.get(result["reason"], "認証に失敗しました。")
-            QMessageBox.warning(dialog, "認証失敗", msg)
-            change_key_msg.setText("")
-        change_key_btn.setEnabled(True)
-
-    change_key_btn.clicked.connect(on_change_key)
-    gen_l.addWidget(change_key_btn)
-    gen_l.addWidget(change_key_msg)
-
     gen_l.addStretch()
     tabs.addTab(gen, "一般")
-
     # ────────────────────────────────────
     # タブ②: AI / LLM
     # ────────────────────────────────────
@@ -526,6 +441,55 @@ def show_settings_dialog(config: dict, js_eval_fn) -> None:
     data_l.addWidget(imp_btn)
     data_l.addStretch()
     tabs.addTab(data_w, "データ")
+
+    # ────────────────────────────────────
+    # タブ④: About
+    # ────────────────────────────────────
+    about_w = QWidget()
+    about_l = QVBoxLayout(about_w)
+    about_l.setContentsMargins(20, 20, 20, 20)
+    about_l.setSpacing(10)
+
+    app_name = QLabel("INK BOSS")
+    app_name.setStyleSheet(
+        "color: white; font-size: 18px; font-weight: bold; letter-spacing: 2px;"
+    )
+    about_l.addWidget(app_name)
+
+    version_lbl = QLabel(f"v{CURRENT_VERSION}")
+    version_lbl.setStyleSheet("color: rgba(255,255,255,0.35); font-size: 12px; font-family: monospace;")
+    about_l.addWidget(version_lbl)
+
+    about_l.addSpacing(8)
+    desc_lbl = QLabel(
+        "All your services. One place. No compromises.\n"
+        "サービスごとにQt / Electronエンジンを選べるデュアルエンジン方式のマルチサービス統合アプリ。"
+    )
+    desc_lbl.setStyleSheet("color: rgba(255,255,255,0.4); font-size: 11px;")
+    desc_lbl.setWordWrap(True)
+    about_l.addWidget(desc_lbl)
+
+    about_l.addSpacing(8)
+    links_lbl = QLabel(
+        '<a href="https://github.com/InkInc-official" style="color:rgba(255,255,255,0.5);">GitHub: InkInc-official</a><br>'
+        '<a href="https://inkinc-hp.vercel.app/" style="color:rgba(255,255,255,0.5);">Web: Ink Inc.</a><br>'
+        '<a href="https://x.com/InkInc_Info" style="color:rgba(255,255,255,0.5);">X: @InkInc_Info</a>'
+    )
+    links_lbl.setOpenExternalLinks(True)
+    links_lbl.setStyleSheet("font-size: 11px;")
+    about_l.addWidget(links_lbl)
+
+    about_l.addStretch()
+    license_lbl = QLabel("MIT License — © 2026 黒井葉跡 / Ink Inc.")
+    license_lbl.setStyleSheet("color: rgba(255,255,255,0.25); font-size: 10px;")
+    about_l.addWidget(license_lbl)
+    tabs.addTab(about_w, "About")
+
+    # 非モーダル表示（.show()）は、この関数を抜けるとローカル変数 dialog への
+    # 参照が切れて即GCされ、ウィンドウが一切表示されない（または一瞬で消える）。
+    # モジュールレベルで参照を保持し、閉じられたら解放する。
+    _open_dialogs.append(dialog)
+    dialog.finished.connect(lambda _=None, d=dialog: _open_dialogs.remove(d) if d in _open_dialogs else None)
 
     dialog.show()
     dialog.raise_()

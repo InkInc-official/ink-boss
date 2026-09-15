@@ -15,12 +15,9 @@ export default function WebViewArea() {
   const handleMinimize = () => window.pywebview?.api?.minimize_window();
   const handleMaximize = () => window.pywebview?.api?.toggle_maximize();
 
-  // タイトルバーにURLを反映
-  if (activeService?.url) {
-    window.pywebview?.api?.update_title?.(activeService.url);
-  } else {
-    window.pywebview?.api?.update_title?.("Ink Boss");
-  }
+  // A1: OS タイトルバーは非表示。表示文言は TopBar 中央のみ。
+  // 互換のため window title は固定
+  window.pywebview?.api?.update_title?.("Ink Boss");
 
   const handleAideToggle = () => {
     const next = !aideOpen;
@@ -45,8 +42,14 @@ export default function WebViewArea() {
         <button onClick={handleMinimize} className="w-3 h-3 rounded-full bg-white/15 hover:bg-yellow-400 transition-colors" />
         <button onClick={handleMaximize} className="w-3 h-3 rounded-full bg-white/10 hover:bg-green-400 transition-colors" />
       </div>
-      <div className="flex-1 flex items-center justify-center">
-        <span className="text-white/20 text-xs font-mono">{showEmpty ? "Ink Boss" : activeService?.url}</span>
+      <div className="flex-1 flex items-center justify-center min-w-0 px-2">
+        <span className="text-white/25 text-xs font-mono truncate max-w-full">
+          {showEmpty
+            ? "Ink Boss"
+            : `${activeService?.name ?? ""}${
+                activeService?.engine === "electron" ? " · Electron" : ""
+              }`}
+        </span>
       </div>
       <div className="flex items-center gap-2">
         {!showEmpty && (

@@ -1,20 +1,47 @@
 """
 dialogs/context_menu.py - サービス・グループのコンテキストメニュー
 Ink Boss / Ink Inc.
+
+- スクリーン座標 + 画面端クランプ
+- アイコン変更
+- 削除時は remove_view（hibernate ではない）
 """
 
 import json
 import uuid
+from pathlib import Path
+
 from PySide6.QtWidgets import (
     QMenu, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QFileDialog, QApplication,
 )
 from PySide6.QtCore import Qt, QPoint
-from config import DIALOG_STYLE, MENU_STYLE, save_config
+from config import DIALOG_STYLE, MENU_STYLE, save_config, CONFIG_DIR
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# サービス コンテキストメニュー
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _clamp_menu_point(x: int, y: int, menu: QMenu) -> QPoint:
+    """メニューが画面外に出ないようクランプ。"""
+    screen = QApplication.primaryScreen()
+    if screen is None:
+        return QPoint(int(x), int(y))
+    geo = screen.availableGeometry()
+    menu.ensurePolished()
+    # サイズ推定
+    hint = menu.sizeHint()
+    mw = max(hint.width(), 180)
+    mh = max(hint.height(), 120)
+    nx = int(x)
+    ny = int(y)
+    if nx + mw > geo.right():
+        nx = geo.right() - mw - 4
+    if ny + mh > geo.bottom():
+        ny = geo.bottom() - mh - 4
+    if nx < geo.left():
+        nx = geo.left() + 4
+    if ny < geo.top():
+        ny = geo.top() + 4
+    return QPoint(nx, ny)
+
 
 def show_service_context_menu(
     sid: str, name: str, x: int, y: int,
@@ -22,22 +49,23 @@ def show_service_context_menu(
     config: dict, js_eval_fn,
     wake_view_fn, hibernate_view_fn,
     create_view_fn,
-    active_menu_holder: list,   # [menu_or_None]
+    remove_view_fn=None,
+    active_menu_holder: list | None = None,
 ) -> None:
-    """
-    サービスの右クリックメニューを表示する。
+    if active_menu_holder and active_menu_holder[0]:
+        try:
+            active_menu_holder[0].close()
+        except Exception:
+            pass
 
-    active_menu_holder: [None] の1要素リストを渡し、メニュー多重起動を防ぐ。
-    """
-    if active_menu_holder[0]:
-        active_menu_holder[0].close()
-
-    groups = json.loads(groups_json)
+    groups = json.loads(groups_json) if groups_json else []
     menu = QMenu()
     menu.setStyleSheet(MENU_STYLE)
-    active_menu_holder[0] = menu
+    if active_menu_holder is not None:
+        active_menu_holder[0] = menu
 
     rename_a = menu.addAction("名前を変更")
+    icon_a = menu.addAction("アイコンを変更…")
     menu.addSeparator()
 
     move_map, copy_map = {}, {}
@@ -54,27 +82,48 @@ def show_service_context_menu(
             copy_map[id(a)] = g["id"]
         menu.addSeparator()
 
+    # エンジン表示（非活性・情報のみ）と切替（別項目・要確認）
+    svc = next((s for s in config.get("services", []) if s["id"] == sid), None)
+    cur_eng = ((svc or {}).get("engine") or "qt").lower()
+    eng_label = "Electron" if cur_eng == "electron" else "Qt"
+    status_a = menu.addAction(f"現在のエンジン: {eng_label}")
+    status_a.setEnabled(False)
+    switch_a = menu.addAction("エンジンを切り替える…")
+    menu.addSeparator()
+
     toggle_a = menu.addAction("復帰" if is_hib else "休止")
     menu.addSeparator()
     delete_a = menu.addAction("削除")
 
-    action = menu.exec(QPoint(x, y))
-    active_menu_holder[0] = None
+    pt = _clamp_menu_point(x, y, menu)
+    action = menu.exec(pt)
+    if active_menu_holder is not None:
+        active_menu_holder[0] = None
 
     if not action:
         return
 
     if action == rename_a:
         _do_rename(sid, name, config, js_eval_fn)
+    elif action == icon_a:
+        _do_change_icon(sid, config, js_eval_fn)
+    elif action == switch_a:
+        _do_toggle_engine(sid, name, config, js_eval_fn)
     elif action == delete_a:
-        _do_delete(sid, name, config, js_eval_fn, hibernate_view_fn)
+        # 重要: hibernate ではなく remove
+        rm = remove_view_fn or hibernate_view_fn
+        _do_delete(sid, name, config, js_eval_fn, rm)
     elif action == toggle_a:
         if is_hib:
             wake_view_fn(sid)
-            js_eval_fn(f"window.dispatchEvent(new CustomEvent('service-woke',{{detail:'{sid}'}}));")
+            js_eval_fn(
+                f"window.dispatchEvent(new CustomEvent('service-woke',{{detail:'{sid}'}}));"
+            )
         else:
             hibernate_view_fn(sid)
-            js_eval_fn(f"window.dispatchEvent(new CustomEvent('service-hibernated',{{detail:'{sid}'}}));")
+            js_eval_fn(
+                f"window.dispatchEvent(new CustomEvent('service-hibernated',{{detail:'{sid}'}}));"
+            )
     else:
         aid = id(action)
         if aid in move_map:
@@ -84,20 +133,32 @@ def show_service_context_menu(
                     s["groupId"] = gid
                     break
             save_config(config)
-            js_eval_fn(f"window.dispatchEvent(new CustomEvent('service-moved',{{detail:{{id:'{sid}',groupId:'{gid}'}}}}));")
+            js_eval_fn(
+                f"window.dispatchEvent(new CustomEvent('service-moved',"
+                f"{{detail:{{id:'{sid}',groupId:'{gid}'}}}}));"
+            )
         elif aid in copy_map:
             gid = copy_map[aid]
             orig = next((s for s in config["services"] if s["id"] == sid), None)
             if orig:
+                eng = (orig.get("engine") or "qt").lower()
                 new_svc = {
                     "id": f"service_{uuid.uuid4().hex[:8]}",
-                    "name": orig["name"], "url": orig["url"],
-                    "muted": False, "groupId": gid,
+                    "name": orig["name"],
+                    "url": orig["url"],
+                    "muted": False,
+                    "groupId": gid,
+                    "engine": eng if eng in ("qt", "electron") else "qt",
+                    "icon": orig.get("icon"),
                 }
                 config["services"].append(new_svc)
                 save_config(config)
-                create_view_fn(new_svc["id"], new_svc["url"])
-                js_eval_fn(f"window.dispatchEvent(new CustomEvent('service-copied',{{detail:{json.dumps(new_svc)}}}));")
+                if eng != "electron":
+                    create_view_fn(new_svc["id"], new_svc["url"])
+                js_eval_fn(
+                    f"window.dispatchEvent(new CustomEvent('service-copied',"
+                    f"{{detail:{json.dumps(new_svc)}}}));"
+                )
 
 
 def _do_rename(sid: str, current_name: str, config: dict, js_eval_fn) -> None:
@@ -138,9 +199,82 @@ def _do_rename(sid: str, current_name: str, config: dict, js_eval_fn) -> None:
     ok_btn.clicked.connect(on_ok)
     name_input.setFocus()
     name_input.selectAll()
-    dialog.show()
-    dialog.raise_()
-    dialog.activateWindow()
+    dialog.exec()
+
+
+def _do_change_icon(sid: str, config: dict, js_eval_fn) -> None:
+    """ローカル画像を選んで services[].icon に保存。"""
+    path, _ = QFileDialog.getOpenFileName(
+        None,
+        "アイコン画像を選択",
+        str(Path.home()),
+        "Images (*.png *.jpg *.jpeg *.webp *.ico *.svg)",
+    )
+    if not path:
+        return
+    icons_dir = CONFIG_DIR / "icons"
+    icons_dir.mkdir(parents=True, exist_ok=True)
+    src = Path(path)
+    dest = icons_dir / f"{sid}{src.suffix.lower() or '.png'}"
+    try:
+        dest.write_bytes(src.read_bytes())
+    except Exception as e:
+        print(f"[icon] copy failed: {e}", flush=True)
+        return
+    # file:// URL でフロント img に渡す
+    icon_url = dest.resolve().as_uri()
+    for s in config.get("services", []):
+        if s["id"] == sid:
+            s["icon"] = icon_url
+            break
+    save_config(config)
+    js_eval_fn(
+        f"window.dispatchEvent(new CustomEvent('service-icon-changed',"
+        f"{{detail:{{id:{json.dumps(sid)},icon:{json.dumps(icon_url)}}}}}))"
+    )
+
+
+def _do_toggle_engine(sid: str, name: str, config: dict, js_eval_fn) -> None:
+    """エンジン切替は確認ダイアログを挟んでから実行（誤操作でのログイン状態消失を防ぐ）。
+    切替自体はフロント経由で update_service に任せる（view 再作成のため）。"""
+    svc = next((s for s in config.get("services", []) if s["id"] == sid), None)
+    if svc is None:
+        return
+    cur = (svc.get("engine") or "qt").lower()
+    new_eng = "qt" if cur == "electron" else "electron"
+    cur_label = "Electron" if cur == "electron" else "Qt"
+    new_label = "Electron" if new_eng == "electron" else "Qt"
+
+    dialog = QDialog()
+    dialog.setWindowTitle("エンジン切替の確認")
+    dialog.setMinimumWidth(360)
+    dialog.setStyleSheet(DIALOG_STYLE)
+    dialog.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+    layout = QVBoxLayout(dialog)
+    layout.setSpacing(12)
+    layout.setContentsMargins(24, 24, 24, 24)
+    layout.addWidget(QLabel(f"「{name}」を {cur_label} エンジンから {new_label} エンジンに切り替えますか？"))
+    warn = QLabel("切替後、このサービスの現在のログイン状態は失われます（エンジンごとにセッションが別管理のため）。")
+    warn.setWordWrap(True)
+    layout.addWidget(warn)
+    btn_layout = QHBoxLayout()
+    cancel_btn = QPushButton("キャンセル")
+    switch_btn = QPushButton("切り替える")
+    switch_btn.setObjectName("addBtn")
+    btn_layout.addWidget(cancel_btn)
+    btn_layout.addWidget(switch_btn)
+    layout.addLayout(btn_layout)
+    cancel_btn.clicked.connect(dialog.reject)
+
+    def on_switch():
+        js_eval_fn(
+            f"window.dispatchEvent(new CustomEvent('service-engine-changed',"
+            f"{{detail:{{id:{json.dumps(sid)},engine:{json.dumps(new_eng)}}}}}))"
+        )
+        dialog.accept()
+
+    switch_btn.clicked.connect(on_switch)
+    dialog.exec()
 
 
 def _do_delete(sid: str, name: str, config: dict, js_eval_fn, remove_view_fn) -> None:
@@ -165,33 +299,39 @@ def _do_delete(sid: str, name: str, config: dict, js_eval_fn, remove_view_fn) ->
     def on_delete():
         config["services"] = [s for s in config["services"] if s["id"] != sid]
         save_config(config)
-        remove_view_fn(sid)
-        js_eval_fn(f"window.dispatchEvent(new CustomEvent('service-removed',{{detail:'{sid}'}}));")
+        try:
+            if remove_view_fn:
+                remove_view_fn(sid)
+        except Exception as e:
+            print(f"[delete] remove_view: {e}", flush=True)
+        # フロントはローカル state のみ更新（API 二重呼び出し防止）
+        js_eval_fn(
+            f"window.dispatchEvent(new CustomEvent('service-removed',{{detail:'{sid}'}}));"
+        )
         dialog.accept()
 
     del_btn.clicked.connect(on_delete)
     dialog.exec()
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# グループ コンテキストメニュー
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 def show_group_context_menu(
     gid: str, name: str, x: int, y: int,
     config: dict, js_eval_fn,
     active_menu_holder: list,
 ) -> None:
-    """グループの右クリックメニューを表示する。"""
     if active_menu_holder[0]:
-        active_menu_holder[0].close()
+        try:
+            active_menu_holder[0].close()
+        except Exception:
+            pass
     menu = QMenu()
     menu.setStyleSheet(MENU_STYLE)
     active_menu_holder[0] = menu
     rename_a = menu.addAction("名前を変更")
     menu.addSeparator()
     delete_a = menu.addAction("削除")
-    action = menu.exec(QPoint(x, y))
+    pt = _clamp_menu_point(x, y, menu)
+    action = menu.exec(pt)
     active_menu_holder[0] = None
     if not action:
         return
@@ -267,7 +407,9 @@ def _delete_group(gid: str, name: str, config: dict, js_eval_fn) -> None:
             if s.get("groupId") == gid:
                 s["groupId"] = None
         save_config(config)
-        js_eval_fn(f"window.dispatchEvent(new CustomEvent('group-removed',{{detail:'{gid}'}}));")
+        js_eval_fn(
+            f"window.dispatchEvent(new CustomEvent('group-removed',{{detail:'{gid}'}}));"
+        )
         dialog.close()
 
     del_btn.clicked.connect(on_delete)

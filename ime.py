@@ -65,31 +65,41 @@ def setup_ime() -> str:
         subprocess.run(["pgrep", "-x", "ibus-daemon"], capture_output=True).returncode == 0
     )
 
+    # 重要:
+    # システムの libfcitx5platforminputcontextplugin.so は distro の Qt6 向けで、
+    # pip の PySide6 同梱 Qt とは PRIVATE_API が合いせずロードに失敗することが多い。
+    # → PySide6 同梱の ibus プラグインを使い、fcitx5 の ibus フロントエンドへ繋ぐ。
     if fcitx5_running:
-        _link_plugin("libfcitx5platforminputcontextplugin.so")
-        os.environ["QT_IM_MODULE"]  = "ibus"
-        os.environ["XMODIFIERS"]    = "@im=ibus"
+        _link_plugin("libfcitx5platforminputcontextplugin.so")  # ダメ元（環境によっては動く）
+        _link_plugin("libibusplatforminputcontextplugin.so")
+        # 強制上書き（setdefault 禁止。シェルの QT_IM_MODULE=fcitx を残すと IME 不能）
+        os.environ["QT_IM_MODULE"] = "ibus"
+        os.environ["XMODIFIERS"] = "@im=ibus"
         os.environ["GTK_IM_MODULE"] = "ibus"
-        os.environ["INPUT_METHOD"]  = "ibus"
+        os.environ["INPUT_METHOD"] = "ibus"
         os.environ["SDL_IM_MODULE"] = "ibus"
-        existing = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
-            existing + " --ozone-platform-hint=auto"
-        ).strip()
+        # fcitx5 の ibus フロントエンドが無効だと繋がらないことがある
+        # （ユーザー側: fcitx5-configtool で IBus フロントエンドを有効に）
         return "fcitx5(via ibus)"
 
     elif ibus_running:
         _link_plugin("libibusplatforminputcontextplugin.so")
-        os.environ["QT_IM_MODULE"]  = "ibus"
-        os.environ["XMODIFIERS"]    = "@im=ibus"
+        os.environ["QT_IM_MODULE"] = "ibus"
+        os.environ["XMODIFIERS"] = "@im=ibus"
         os.environ["GTK_IM_MODULE"] = "ibus"
-        os.environ["INPUT_METHOD"]  = "ibus"
+        os.environ["INPUT_METHOD"] = "ibus"
         return "ibus"
 
     else:
+        # デーモン未起動時も ibus プラグイン優先（後から fcitx5 が上がるケース）
+        if _link_plugin("libibusplatforminputcontextplugin.so"):
+            os.environ["QT_IM_MODULE"] = "ibus"
+            os.environ["XMODIFIERS"] = "@im=ibus"
+            os.environ["GTK_IM_MODULE"] = "ibus"
+            return "ibus(no daemon)"
         if _link_plugin("libfcitx5platforminputcontextplugin.so"):
-            os.environ["QT_IM_MODULE"]  = "fcitx"
-            os.environ["XMODIFIERS"]    = "@im=fcitx"
+            os.environ["QT_IM_MODULE"] = "fcitx"
+            os.environ["XMODIFIERS"] = "@im=fcitx"
             os.environ["GTK_IM_MODULE"] = "fcitx"
             return "fcitx5(not running)"
         return "none"

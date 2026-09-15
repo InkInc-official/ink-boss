@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useAppStore } from "../store";
 import type { Service } from "../types";
 import ConfirmDialog from "./ConfirmDialog";
@@ -7,8 +7,8 @@ export default function Sidebar() {
   const {
     services, groups, activeServiceId, hibernatedIds, wakingIds,
     setActiveService, toggleGroupCollapsed,
-    moveService, removeService,
-    updateGroup, removeGroup, setHibernated,
+    moveService, dropServiceLocal, reorderServices,
+    removeGroup, setHibernated, updateService,
   } = useAppStore();
 
   const [expanded, setExpanded] = useState(true);
@@ -17,18 +17,38 @@ export default function Sidebar() {
   const [editingGroupName, setEditingGroupName] = useState("");
   const [confirmDeleteGroupId, setConfirmDeleteGroupId] = useState<string | null>(null);
   const dragService = useRef<string | null>(null);
+  const dragSourceGroup = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     const onHibernated = (e: CustomEvent) => setHibernated(e.detail, true);
     const onWoke = (e: CustomEvent) => setHibernated(e.detail, false);
-    const onRemoved = (e: CustomEvent) => removeService(e.detail);
+    // Python 側で既に config/view 削除済み → API 再呼び出し禁止
+    const onRemoved = (e: CustomEvent) => dropServiceLocal(e.detail);
     const onRenamed = (e: CustomEvent) => {
       const { id, name } = e.detail;
-      useAppStore.setState((s) => ({ services: s.services.map((sv) => sv.id === id ? { ...sv, name } : sv) }));
+      useAppStore.setState((s) => ({
+        services: s.services.map((sv) => (sv.id === id ? { ...sv, name } : sv)),
+      }));
+    };
+    const onIcon = (e: CustomEvent) => {
+      const { id, icon } = e.detail;
+      useAppStore.setState((s) => ({
+        services: s.services.map((sv) => (sv.id === id ? { ...sv, icon } : sv)),
+      }));
+    };
+    const onEngine = (e: CustomEvent) => {
+      const { id, engine } = e.detail;
+      void updateService(id, { engine });
     };
     const onAdded = (e: CustomEvent) => {
       const svc = e.detail;
-      useAppStore.setState((s) => ({ services: [...s.services, svc], hibernatedIds: new Set([...s.hibernatedIds, svc.id]) }));
+      useAppStore.setState((s) => {
+        if (s.services.some((x) => x.id === svc.id)) return s;
+        return {
+          services: [...s.services, svc],
+          hibernatedIds: new Set([...s.hibernatedIds, svc.id]),
+        };
+      });
     };
     const onGroupAdded = (e: CustomEvent) => {
       useAppStore.setState((s) => ({ groups: [...s.groups, e.detail] }));
@@ -36,40 +56,41 @@ export default function Sidebar() {
     const onGroupRemoved = (e: CustomEvent) => {
       useAppStore.setState((s) => ({
         groups: s.groups.filter((g) => g.id !== e.detail),
-        services: s.services.map((sv) => sv.groupId === e.detail ? { ...sv, groupId: undefined } : sv),
+        services: s.services.map((sv) =>
+          sv.groupId === e.detail ? { ...sv, groupId: undefined } : sv,
+        ),
       }));
     };
     const onHibChanged = (e: CustomEvent) => {
-      useAppStore.setState((s) => ({ config: { ...s.config, hibernateMinutes: e.detail } }));
+      useAppStore.setState((s) => ({
+        config: { ...s.config, hibernateMinutes: e.detail },
+      }));
     };
     const onGroupRenamed = (e: CustomEvent) => {
       const { id, name } = e.detail;
-      useAppStore.setState((s) => ({ groups: s.groups.map((g) => g.id === id ? { ...g, name } : g) }));
+      useAppStore.setState((s) => ({
+        groups: s.groups.map((g) => (g.id === id ? { ...g, name } : g)),
+      }));
     };
-;
-    window.addEventListener("service-hibernated", onHibernated as EventListener);
-    window.addEventListener("service-woke", onWoke as EventListener);
-    window.addEventListener("service-removed", onRemoved as EventListener);
-    window.addEventListener("service-renamed", onRenamed as EventListener);
-    window.addEventListener("service-added", onAdded as EventListener);
-    window.addEventListener("group-added", onGroupAdded as EventListener);
-    window.addEventListener("group-removed", onGroupRemoved as EventListener);
-    window.addEventListener("hibernate-changed", onHibChanged as EventListener);
-    window.addEventListener("group-renamed", onGroupRenamed as EventListener);
-    window.addEventListener("group-renamed", onGroupRenamed as EventListener);
+
+    const pairs: [string, EventListener][] = [
+      ["service-hibernated", onHibernated as EventListener],
+      ["service-woke", onWoke as EventListener],
+      ["service-removed", onRemoved as EventListener],
+      ["service-renamed", onRenamed as EventListener],
+      ["service-icon-changed", onIcon as EventListener],
+      ["service-engine-changed", onEngine as EventListener],
+      ["service-added", onAdded as EventListener],
+      ["group-added", onGroupAdded as EventListener],
+      ["group-removed", onGroupRemoved as EventListener],
+      ["hibernate-changed", onHibChanged as EventListener],
+      ["group-renamed", onGroupRenamed as EventListener],
+    ];
+    for (const [n, h] of pairs) window.addEventListener(n, h);
     return () => {
-      window.removeEventListener("service-hibernated", onHibernated as EventListener);
-      window.removeEventListener("service-woke", onWoke as EventListener);
-      window.removeEventListener("service-removed", onRemoved as EventListener);
-      window.removeEventListener("service-renamed", onRenamed as EventListener);
-      window.removeEventListener("service-added", onAdded as EventListener);
-      window.removeEventListener("group-added", onGroupAdded as EventListener);
-      window.removeEventListener("group-removed", onGroupRemoved as EventListener);
-      window.removeEventListener("hibernate-changed", onHibChanged as EventListener);
-      window.removeEventListener("group-renamed", onGroupRenamed as EventListener);
-      window.removeEventListener("group-renamed", onGroupRenamed as EventListener);
+      for (const [n, h] of pairs) window.removeEventListener(n, h);
     };
-  }, [setHibernated, removeService]);
+  }, [setHibernated, dropServiceLocal, updateService]);
 
   const ungrouped = services.filter((s) => !s.groupId);
   const getFavicon = (url: string) => {
@@ -77,16 +98,13 @@ export default function Sidebar() {
     catch { return null; }
   };
   const handleServiceClick = async (service: Service) => {
-    // 休止中はシングルクリック無効（ダブルクリックで復帰）
     if (hibernatedIds.has(service.id) || wakingIds.has(service.id)) return;
     setActiveService(service.id);
     await window.pywebview?.api?.show_service(service.id);
   };
   const handleServiceDoubleClick = async (service: Service) => {
     if (wakingIds.has(service.id)) return;
-    // 休止中ならwakeを待ってからsetActiveService
     if (hibernatedIds.has(service.id)) {
-      // service-wokeが来たらsetActiveService（一度だけ）
       const onWoke = (e: CustomEvent) => {
         if (e.detail === service.id) {
           setActiveService(service.id);
@@ -100,13 +118,61 @@ export default function Sidebar() {
     setActiveService(service.id);
     await window.pywebview?.api?.show_service(service.id);
   };
-  const ServiceItem = ({ service }: { service: Service }) => {
+
+  // ── サービスDnD並べ替え ──────────────────────────────
+  const handleServiceDragStart = useCallback((serviceId: string, groupId: string | undefined) => {
+    dragService.current = serviceId;
+    dragSourceGroup.current = groupId;
+  }, []);
+
+  const handleServiceDrop = useCallback(async (
+    targetServiceId: string,
+    targetGroupId: string | undefined,
+  ) => {
+    const srcId = dragService.current;
+    if (!srcId) return;
+    dragService.current = null;
+
+    // 自分自身にドロップ → 何もしない
+    if (srcId === targetServiceId) return;
+
+    const srcGroup = dragSourceGroup.current;
+    dragSourceGroup.current = undefined;
+
+    // 異なるグループ間の移動 → moveService を使う
+    if (srcGroup !== targetGroupId) {
+      await moveService(srcId, targetGroupId ?? "");
+      return;
+    }
+
+    // 同じグループ内の並べ替え
+    const sameGroupServices = services.filter((s) => s.groupId === targetGroupId);
+    const ids = sameGroupServices.map((s) => s.id);
+    const fromIdx = ids.indexOf(srcId);
+    const toIdx = ids.indexOf(targetServiceId);
+    if (fromIdx === -1 || toIdx === -1) return;
+
+    // 配列を並べ替え
+    ids.splice(fromIdx, 1);
+    ids.splice(toIdx, 0, srcId);
+    await reorderServices(ids);
+  }, [services, moveService, reorderServices]);
+
+  const ServiceItem = ({ service, groupId }: { service: Service; groupId?: string }) => {
     const isActive = activeServiceId === service.id;
     const isHibernated = hibernatedIds.has(service.id);
     const isWaking = wakingIds.has(service.id);
     const favicon = service.icon || getFavicon(service.url);
+    const eng = service.engine === "electron" ? "E" : "Q";
     return (
-      <button draggable onDragStart={() => { dragService.current = service.id; }}
+      <button draggable
+        onDragStart={() => handleServiceDragStart(service.id, groupId ?? service.groupId)}
+        onDragOver={(e) => { e.preventDefault(); }}
+        onDrop={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          handleServiceDrop(service.id, groupId ?? service.groupId);
+        }}
         onClick={() => handleServiceClick(service)}
         onDoubleClick={() => handleServiceDoubleClick(service)}
         onContextMenu={(e) => {
@@ -114,18 +180,63 @@ export default function Sidebar() {
           const isHib = hibernatedIds.has(service.id);
           const otherGroups = groups.filter((g) => g.id !== service.groupId);
           const groupsJson = JSON.stringify(otherGroups.map((g) => ({ id: g.id, name: g.name })));
-          window.pywebview?.api?.show_context_menu(service.id, service.name, 214, e.clientY, isHib, groupsJson);
+          // スクリーン絶対座標（Qt QMenu は screen 座標）
+          const sx = Math.round((window.screenX || 0) + e.clientX);
+          const sy = Math.round((window.screenY || 0) + e.clientY);
+          window.pywebview?.api?.show_context_menu?.(
+            service.id, service.name, sx, sy, isHib, groupsJson,
+          );
         }}
         className={`group relative flex items-center gap-2.5 w-full px-2.5 py-2 rounded-xl transition-all duration-150 select-none ${isHibernated ? "cursor-not-allowed opacity-40" : "cursor-pointer"} ${isActive ? "bg-white/10 border border-white/15" : "hover:bg-white/5 border border-transparent"}`}
         title={!expanded ? (isHibernated ? `${service.name}（ダブルクリックで復帰）` : service.name) : undefined}>
         {isActive && <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[2px] h-5 bg-white/60 rounded-r-full" />}
         <div className="flex-shrink-0 w-7 h-7 rounded-lg overflow-hidden flex items-center justify-center bg-white/5 relative">
-          {favicon ? <img src={favicon} alt="" className="w-5 h-5 object-contain" style={{ filter: "grayscale(100%) brightness(1.2)" }} />
-            : <span className="text-white/50 text-xs font-bold">{service.name[0]?.toUpperCase()}</span>}
-          {isHibernated && !isWaking && <div className="absolute inset-0 flex items-center justify-center bg-black/50 rounded-lg"><span className="text-white/70 text-[10px]">Z</span></div>}
-          {isWaking && <div className="absolute inset-0 flex items-center justify-center bg-black/50 rounded-lg"><div className="w-3 h-3 border border-white/40 border-t-white/80 rounded-full animate-spin" /></div>}
+          {favicon ? (
+            <img
+              src={favicon}
+              alt=""
+              className="w-5 h-5 object-contain"
+              // 色付きファビコン（以前の grayscale をやめる）
+              onError={(ev) => {
+                (ev.target as HTMLImageElement).style.display = "none";
+              }}
+            />
+          ) : (
+            <span className="text-white/50 text-xs font-bold">{service.name[0]?.toUpperCase()}</span>
+          )}
+          {isHibernated && !isWaking && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/50 rounded-lg">
+              <span className="text-white/70 text-[10px]">Z</span>
+            </div>
+          )}
+          {isWaking && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/50 rounded-lg">
+              <div className="w-3 h-3 border border-white/40 border-t-white/80 rounded-full animate-spin" />
+            </div>
+          )}
         </div>
-        {expanded && <span className={`text-sm truncate transition-colors ${isActive ? "text-white font-medium" : "text-white/50 group-hover:text-white/80"}`}>{service.name}{isHibernated && !isWaking && <span className="ml-1 text-[10px] text-white/30">休止</span>}</span>}
+        {expanded && (
+          <span
+            className={`flex-1 text-sm truncate transition-colors ${
+              isActive ? "text-white font-medium" : "text-white/50 group-hover:text-white/80"
+            }`}
+          >
+            {service.name}
+            {isHibernated && !isWaking && (
+              <span className="ml-1 text-[10px] text-white/30">休止</span>
+            )}
+          </span>
+        )}
+        {expanded && (
+          <span
+            className={`text-[9px] font-mono flex-shrink-0 px-1 py-0.5 rounded ${
+              eng === "E" ? "text-sky-300/70 bg-sky-400/10" : "text-white/25 bg-white/5"
+            }`}
+            title={eng === "E" ? "Electron" : "Qt"}
+          >
+            {eng}
+          </span>
+        )}
       </button>
     );
   };
@@ -165,17 +276,45 @@ export default function Sidebar() {
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault();
-                  window.pywebview?.api?.show_group_context_menu?.(group.id, group.name, e.clientX, e.clientY);
+                  const sx = Math.round((window.screenX || 0) + e.clientX);
+                  const sy = Math.round((window.screenY || 0) + e.clientY);
+                  window.pywebview?.api?.show_group_context_menu?.(
+                    group.id, group.name, sx, sy,
+                  );
                 }}>
                 <div className="flex items-center gap-1.5 px-2 py-1 mb-0.5 cursor-grab select-none">
                   <button onClick={(e) => { e.stopPropagation(); toggleGroupCollapsed(group.id); }} className="text-white/20 hover:text-white/50 transition-colors text-[10px] w-3 h-3 flex items-center justify-center flex-shrink-0">{group.collapsed ? "▶" : "▼"}</button>
                   {expanded && <span className="flex-1 text-[10px] font-mono uppercase tracking-[0.15em] text-white/25 truncate">{group.name}</span>}
                 </div>
-                {!group.collapsed && groupServices.map((s) => <ServiceItem key={s.id} service={s} />)}
+                {!group.collapsed && groupServices.map((s) => <ServiceItem key={s.id} service={s} groupId={group.id} />)}
               </div>
             );
           })}
-          {ungrouped.map((s) => <ServiceItem key={s.id} service={s} />)}
+          {/* 未分類サービス → ドロップゾーンとしても機能 */}
+          <div onDragOver={(e) => e.preventDefault()}
+               onDrop={(e) => {
+                 e.preventDefault();
+                 const srcId = dragService.current;
+                 if (srcId) {
+                   const svc = services.find((s) => s.id === srcId);
+                   if (svc && svc.groupId) {
+                     moveService(srcId, "");
+                     dragService.current = null;
+                   } else if (svc && !svc.groupId) {
+                     // 未分類同士の並べ替え
+                     const ungroupedIds = services.filter((s) => !s.groupId).map((s) => s.id);
+                     const fromIdx = ungroupedIds.indexOf(srcId);
+                     if (fromIdx !== -1) {
+                       ungroupedIds.splice(fromIdx, 1);
+                       ungroupedIds.push(srcId);
+                       reorderServices(ungroupedIds);
+                     }
+                     dragService.current = null;
+                   }
+                 }
+               }}>
+            {ungrouped.map((s) => <ServiceItem key={s.id} service={s} />)}
+          </div>
         </nav>
         <div className="h-px bg-white/5 mx-3" />
         <div className="flex-shrink-0 px-1.5 py-2">

@@ -2,44 +2,105 @@
 api.py - InkBossAPI
 Ink Boss / Ink Inc.
 
-pywebviewのjs_apiとして登録するクラス。
-JSからPythonの機能を呼び出す橋渡しをする。
+pywebview js_api + dual-engine routing (qt | electron).
 """
 
+from __future__ import annotations
+
 import json
+import threading
 import uuid
+
 import webview
-from PySide6.QtCore import QTimer
 
 from config import save_config
 from bridge import js_eval
 
 
 class InkBossAPI:
-    """pywebview js_api クラス。メソッドはすべてJSから呼び出される。"""
+    def __init__(
+        self,
+        config: dict,
+        bridge,
+        get_rect_fn,
+        aide_width_getter,
+        electron=None,
+        get_screen_rect_fn=None,
+    ):
+        self._config = config
+        self._bridge = bridge
+        self._get_rect = get_rect_fn
+        self._get_screen_rect = get_screen_rect_fn
+        self._electron = electron
+        self._aide_width = aide_width_getter
+        self._aide_width_val = 0
+        self._dragging = False
+        self._active_engine: str | None = None
 
-    def __init__(self, config: dict, bridge, get_rect_fn, aide_width_getter):
-        """
-        Args:
-            config:           共有configオブジェクト
-            bridge:           ViewBridgeインスタンス
-            get_rect_fn:      get_rect(window, aide_w) → (x,y,w,h)
-            aide_width_getter: () → int  現在の_aide_width
-        """
-        self._config          = config
-        self._bridge          = bridge
-        self._get_rect        = get_rect_fn
-        self._aide_width      = aide_width_getter   # callable
-        self._aide_width_val  = 0                   # 実値（set_aide_widthで更新）
+    # ── helpers ───────────────────────────────────────────
+    def _find_service(self, sid: str) -> dict | None:
+        return next((s for s in self._config.get("services", []) if s["id"] == sid), None)
 
-    # ────────────────────────────────────
-    # 設定
-    # ────────────────────────────────────
+    def _service_engine(self, sid: str) -> str:
+        svc = self._find_service(sid)
+        if not svc:
+            return "qt"
+        eng = (svc.get("engine") or "qt").lower()
+        return "electron" if eng in ("electron", "e") else "qt"
+
+    def _screen_rect(self, window, aide_w: int) -> tuple[int, int, int, int]:
+        if self._get_screen_rect:
+            return self._get_screen_rect(window, aide_w)
+        x, y, w, h = self._get_rect(window, aide_w)
+        wx = int(getattr(window, "x", 0) or 0)
+        wy = int(getattr(window, "y", 0) or 0)
+        return wx + x, wy + y, w, h
+
+    def _hide_other_engine(self, keep: str) -> None:
+        if keep != "qt":
+            try:
+                self._bridge.hide_all_signal.emit()
+            except Exception as e:
+                print(f"[api] hide qt failed: {e}", flush=True)
+        if keep != "electron" and self._electron and self._electron.is_available():
+            try:
+                self._electron.hide_all()
+            except Exception as e:
+                print(f"[api] hide electron failed: {e}", flush=True)
+
+    def _destroy_engine_view(self, sid: str, eng: str | None = None) -> None:
+        eng = eng or self._service_engine(sid)
+        try:
+            if eng == "electron":
+                if self._electron and self._electron.is_available():
+                    self._electron.remove(sid)
+            else:
+                self._bridge.remove_view_signal.emit(sid)
+        except Exception as e:
+            print(f"[api] destroy view {sid}/{eng}: {e}", flush=True)
+
+    def sync_active_overlay(self) -> None:
+        """B1: drag/resize 中に Electron をコンテンツ領域へ追従させる。"""
+        sid = self._bridge.active_id
+        if not sid or self._service_engine(sid) != "electron":
+            return
+        if not self._electron or not self._electron.is_available():
+            return
+        w = webview.windows[0] if webview.windows else None
+        if not w:
+            return
+        try:
+            sx, sy, sw, sh = self._screen_rect(w, self._aide_width_val)
+            self._electron.bounds(sid, sx, sy, sw, sh)
+        except Exception as e:
+            print(f"[api] sync_active_overlay: {e}", flush=True)
+
+    # ── config ────────────────────────────────────────────
     def get_config(self):
         return self._config
 
     def update_llm_config(self, updates):
-        self._config["llm"].update(updates)
+        self._config.setdefault("llm", {}).update(updates)
         save_config(self._config)
 
     def update_hibernate_minutes(self, minutes):
@@ -55,50 +116,98 @@ class InkBossAPI:
         self._config.update(new)
         save_config(self._config)
 
-    # ────────────────────────────────────
-    # サービス
-    # ────────────────────────────────────
-    def add_service(self, name, url, group_id=None):
+    # ── services ──────────────────────────────────────────
+    def add_service(self, name, url, group_id=None, engine="qt"):
+        eng = (engine or "qt").lower()
+        if eng not in ("qt", "electron"):
+            eng = "qt"
         svc = {
             "id": f"service_{uuid.uuid4().hex[:8]}",
-            "name": name, "url": url, "muted": False, "groupId": group_id,
+            "name": name,
+            "url": url,
+            "muted": False,
+            "groupId": group_id,
+            "engine": eng,
         }
-        self._config["services"].append(svc)
+        self._config.setdefault("services", []).append(svc)
         save_config(self._config)
-        self._bridge.create_view_signal.emit(svc["id"], url)
+        try:
+            if eng == "electron":
+                if self._electron and self._electron.is_available():
+                    self._electron.create(svc["id"], url, load_now=False)
+            else:
+                self._bridge.create_view_signal.emit(svc["id"], url)
+        except Exception as e:
+            print(f"[api] add_service create failed: {e}", flush=True)
         return svc
 
     def update_service(self, sid, updates):
-        for s in self._config["services"]:
+        prev_eng = self._service_engine(sid)
+        for s in self._config.get("services", []):
             if s["id"] == sid:
-                s.update(updates)
+                s.update(updates or {})
+                if "engine" in (updates or {}):
+                    eng = (updates.get("engine") or "qt").lower()
+                    s["engine"] = eng if eng in ("qt", "electron") else "qt"
                 break
         save_config(self._config)
 
+        new_eng = self._service_engine(sid)
+        if new_eng != prev_eng:
+            self._destroy_engine_view(sid, prev_eng)
+            svc = self._find_service(sid)
+            url = (svc or {}).get("url") or "about:blank"
+            try:
+                if new_eng == "electron":
+                    if self._electron and self._electron.is_available():
+                        self._electron.create(sid, url, load_now=False)
+                else:
+                    self._bridge.create_view_signal.emit(sid, url)
+            except Exception as e:
+                print(f"[api] engine switch failed: {e}", flush=True)
+
     def remove_service(self, sid):
-        self._config["services"] = [s for s in self._config["services"] if s["id"] != sid]
+        eng = self._service_engine(sid)
+        self._config["services"] = [s for s in self._config.get("services", []) if s["id"] != sid]
         save_config(self._config)
-        self._bridge.remove_view_signal.emit(sid)
+        if self._bridge.active_id == sid:
+            self._bridge.active_id = None
+            self._active_engine = None
+        self._destroy_engine_view(sid, eng)
 
     def move_service(self, sid, gid):
-        for s in self._config["services"]:
+        for s in self._config.get("services", []):
             if s["id"] == sid:
-                s["groupId"] = gid
+                s["groupId"] = gid or None
                 break
         save_config(self._config)
 
     def copy_service(self, sid, gid):
-        orig = next((s for s in self._config["services"] if s["id"] == sid), None)
+        orig = self._find_service(sid)
         if not orig:
             return {}
+        eng = (orig.get("engine") or "qt").lower()
+        if eng not in ("qt", "electron"):
+            eng = "qt"
         new_svc = {
             "id": f"service_{uuid.uuid4().hex[:8]}",
-            "name": orig["name"], "url": orig["url"],
-            "muted": False, "groupId": gid,
+            "name": orig["name"],
+            "url": orig["url"],
+            "muted": False,
+            "groupId": gid,
+            "engine": eng,
+            "icon": orig.get("icon"),
         }
-        self._config["services"].append(new_svc)
+        self._config.setdefault("services", []).append(new_svc)
         save_config(self._config)
-        self._bridge.create_view_signal.emit(new_svc["id"], new_svc["url"])
+        try:
+            if eng == "electron":
+                if self._electron and self._electron.is_available():
+                    self._electron.create(new_svc["id"], new_svc["url"], load_now=False)
+            else:
+                self._bridge.create_view_signal.emit(new_svc["id"], new_svc["url"])
+        except Exception as e:
+            print(f"[api] copy_service create failed: {e}", flush=True)
         return new_svc
 
     def show_service(self, sid):
@@ -106,78 +215,161 @@ class InkBossAPI:
         if not w:
             return
         aide_w = self._aide_width_val
+        eng = self._service_engine(sid)
+        svc = self._find_service(sid)
+        url = (svc or {}).get("url") or self._bridge.urls.get(sid, "about:blank")
+
+        if eng == "electron":
+            self._hide_other_engine("electron")
+            if not self._electron or not self._electron.is_available():
+                print(f"[api] show_service({sid}): electron unavailable", flush=True)
+                js_eval(
+                    "window.dispatchEvent(new CustomEvent('engine-error',"
+                    f"{{detail:{{sid:{json.dumps(sid)},engine:'electron',"
+                    "message:'Electronエンジン未起動。electron-engine で npm install してください。'}}}}))"
+                )
+                return
+            sx, sy, sw, sh = self._screen_rect(w, aide_w)
+
+            def _do():
+                try:
+                    self._electron.show(sid, url, sx, sy, sw, sh)
+                    js_eval(
+                        f"window.dispatchEvent(new CustomEvent('service-woke',"
+                        f"{{detail:{json.dumps(sid)}}}))"
+                    )
+                except Exception as e:
+                    print(f"[api] electron show failed: {e}", flush=True)
+
+            threading.Thread(target=_do, daemon=True).start()
+            self._active_engine = "electron"
+            self._bridge.active_id = sid
+            return
+
+        # Qt
+        self._hide_other_engine("qt")
+        self._active_engine = "qt"
+        # ensure view exists (lazy safety)
+        if sid not in self._bridge.views:
+            self._bridge.create_view_signal.emit(sid, url)
         if sid in self._bridge.hibernated:
-            self._bridge.wake_view_signal.emit(sid, self._bridge.urls.get(sid, "about:blank"))
             x, y, ww, h = self._get_rect(w, aide_w)
-            QTimer.singleShot(300, lambda: self._bridge.show_view_signal.emit(sid, x, y, ww, h))
+            # 300ms後の表示ディレイは bridge.py 側（Qtメインスレッド）で
+            # スケジュールする。js_api呼び出しスレッド（Qtイベントループを
+            # 持たない）で直接QTimer.singleShotを使うと発火しないため。
+            self._bridge.wake_and_show_signal.emit(sid, self._bridge.urls.get(sid, url), x, y, ww, h)
         else:
             x, y, ww, h = self._get_rect(w, aide_w)
             self._bridge.show_view_signal.emit(sid, x, y, ww, h)
 
     def hide_service(self):
-        self._bridge.hide_all_signal.emit()
+        try:
+            self._bridge.hide_all_signal.emit()
+        except Exception:
+            pass
+        if self._electron and self._electron.is_available():
+            try:
+                self._electron.hide_all()
+            except Exception:
+                pass
+        self._active_engine = None
 
     def hibernate_service(self, sid):
-        self._bridge.hibernate_view_signal.emit(sid)
+        if self._service_engine(sid) == "electron":
+            if self._electron and self._electron.is_available():
+                self._electron.hibernate(sid)
+            if self._bridge.active_id == sid:
+                self._bridge.active_id = None
+        else:
+            self._bridge.hibernate_view_signal.emit(sid)
 
     def wake_service(self, sid):
-        self._bridge.wake_view_signal.emit(sid, self._bridge.urls.get(sid, "about:blank"))
+        svc = self._find_service(sid)
+        url = (svc or {}).get("url") or self._bridge.urls.get(sid, "about:blank")
+        if self._service_engine(sid) == "electron":
+            if self._electron and self._electron.is_available():
+                self._electron.wake(sid, url)
+                js_eval(
+                    f"window.dispatchEvent(new CustomEvent('service-woke',"
+                    f"{{detail:{json.dumps(sid)}}}))"
+                )
+        else:
+            self._bridge.wake_view_signal.emit(sid, url)
 
     def get_hibernated_ids(self):
-        return list(self._bridge.hibernated)
+        ids = set(self._bridge.hibernated)
+        if self._electron and self._electron.is_available():
+            try:
+                ids.update(self._electron.get_hibernated_ids())
+            except Exception:
+                pass
+        return list(ids)
 
     def reload_service(self, sid):
-        self._bridge.reload_view_signal.emit(sid)
+        if self._service_engine(sid) == "electron":
+            if self._electron and self._electron.is_available():
+                self._electron.reload(sid)
+        else:
+            self._bridge.reload_view_signal.emit(sid)
 
     def sync_geometry(self, sid):
         w = webview.windows[0] if webview.windows else None
         if not w or not sid:
             return
+        if self._service_engine(sid) == "electron":
+            if self._electron and self._electron.is_available():
+                sx, sy, sw, sh = self._screen_rect(w, self._aide_width_val)
+                self._electron.bounds(sid, sx, sy, sw, sh)
+            return
         x, y, ww, h = self._get_rect(w, self._aide_width_val)
         self._bridge.update_geometry(sid, x, y, ww, h)
 
-    # ────────────────────────────────────
-    # グループ
-    # ────────────────────────────────────
+    def reorder_services(self, service_ids):
+        id_order = list(service_ids or [])
+        self._config["services"].sort(
+            key=lambda s: id_order.index(s["id"]) if s["id"] in id_order else 999
+        )
+        save_config(self._config)
+
+    # ── groups ────────────────────────────────────────────
     def add_group(self, name):
         g = {"id": f"group_{uuid.uuid4().hex[:8]}", "name": name, "collapsed": False}
-        self._config["groups"].append(g)
+        self._config.setdefault("groups", []).append(g)
         save_config(self._config)
         return g
 
     def update_group(self, gid, name):
-        for g in self._config["groups"]:
+        for g in self._config.get("groups", []):
             if g["id"] == gid:
                 g["name"] = name
                 break
         save_config(self._config)
 
     def remove_group(self, gid, delete_services):
-        self._config["groups"] = [g for g in self._config["groups"] if g["id"] != gid]
+        self._config["groups"] = [g for g in self._config.get("groups", []) if g["id"] != gid]
         if delete_services:
-            to_rm = [s["id"] for s in self._config["services"] if s.get("groupId") == gid]
+            to_rm = [s for s in self._config.get("services", []) if s.get("groupId") == gid]
             self._config["services"] = [
-                s for s in self._config["services"] if s.get("groupId") != gid
+                s for s in self._config.get("services", []) if s.get("groupId") != gid
             ]
-            for sid in to_rm:
-                self._bridge.remove_view_signal.emit(sid)
+            for s in to_rm:
+                self._destroy_engine_view(s["id"], (s.get("engine") or "qt").lower())
         else:
-            for s in self._config["services"]:
+            for s in self._config.get("services", []):
                 if s.get("groupId") == gid:
                     s["groupId"] = None
         save_config(self._config)
 
     def reorder_groups(self, group_ids):
-        id_order = list(group_ids)
+        id_order = list(group_ids or [])
         self._config["groups"].sort(
             key=lambda g: id_order.index(g["id"]) if g["id"] in id_order else 999
         )
         save_config(self._config)
 
-    # ────────────────────────────────────
-    # ダイアログ
-    # ────────────────────────────────────
+    # ── dialogs ───────────────────────────────────────────
     def show_context_menu(self, sid, name, x, y, is_hib, groups_json):
+        # x,y はスクリーン座標を期待（フロントで変換済み）
         self._bridge.context_menu_signal.emit(sid, name, int(x), int(y), bool(is_hib), groups_json)
 
     def show_add_service_dialog(self, group_id=None):
@@ -192,14 +384,144 @@ class InkBossAPI:
     def show_settings_dialog(self):
         self._bridge.settings_signal.emit()
 
-    # ────────────────────────────────────
-    # ウィンドウ
-    # ────────────────────────────────────
+    # ── window ────────────────────────────────────────────
     def close_window(self):
-        if webview.windows:
-            webview.windows[0].destroy()
+        """
+        ×ボタン終了。JS API スレッドから呼ばれる。
+        QTimer は別スレッドからだと発火しないことがあるため、
+        ViewBridge.app_shutdown_signal（QueuedConnection）で Qt メインへ渡す。
+        並行してハードウォッチドッグを必ず武装する。
+        """
+        import os
+        import time
 
+        print("[Close] close_window start (js_api thread)", flush=True)
+        if getattr(self, "_closing", False):
+            print("[Close] already closing — ignore", flush=True)
+            return
+        self._closing = True
+
+        # ハード保険: どの経路がハングしても 4 秒でプロセスを終わらせる
+        def _hard_watchdog():
+            time.sleep(4.0)
+            print("[Close] HARD watchdog — os._exit(0)", flush=True)
+            os._exit(0)
+
+        threading.Thread(target=_hard_watchdog, daemon=True, name="close-watchdog").start()
+        print("[Close] hard watchdog armed (4000ms)", flush=True)
+
+        # Qt メインスレッドへ（QueuedConnection）
+        try:
+            self._bridge.app_shutdown_signal.emit()
+            print("[Close] app_shutdown_signal emitted", flush=True)
+        except Exception as e:
+            print(f"[Close] signal emit failed: {e} — inline fallback", flush=True)
+            self._shutdown_for_exit()
+
+    def _shutdown_for_exit(self) -> None:
+        """正規終了シーケンス（Qt メインスレッド想定。必ずログを残す）。"""
+        import os
+        import time
+
+        print("[Close] closeEvent start", flush=True)
+        t0 = time.time()
+
+        print("[Close][Step 1/5] Electron shutdown start", flush=True)
+        # 1) Electron を先に落とす（セッション flush）— 最大 3 秒、必ず戻る
+        print("[Close] electron shutdown request sent", flush=True)
+        if self._electron is not None:
+            try:
+                # メインスレッドを長く塞がないよう、別スレッドで待って join(3s)
+                err = [None]
+
+                def _el():
+                    try:
+                        self._electron.shutdown(timeout=2.5)
+                    except Exception as e:
+                        err[0] = e
+
+                th = threading.Thread(target=_el, daemon=True)
+                th.start()
+                th.join(timeout=3.0)
+                if th.is_alive():
+                    print("[Close] electron shutdown still running after 3s — continue", flush=True)
+                elif err[0]:
+                    print(f"[Close] electron shutdown error: {err[0]}", flush=True)
+                else:
+                    print("[Close] electron shutdown confirmed", flush=True)
+            except Exception as e:
+                print(f"[Close] electron shutdown outer error: {e}", flush=True)
+        else:
+            print("[Close] no electron engine", flush=True)
+        print("[Close][Step 1/5] Electron shutdown end", flush=True)
+
+        print("[Close][Step 2/5] Qt views cleanup start", flush=True)
+        # 2) Qt WebEngine view を同期的に破棄（シグナル往復だと終了中に詰まる）
+        print("[Close] qt views cleanup start", flush=True)
+        try:
+            self._bridge._hide_all()
+        except Exception as e:
+            print(f"[Close] hide_all: {e}", flush=True)
+        try:
+            for sid in list(getattr(self._bridge, "views", {}).keys()):
+                try:
+                    self._bridge._remove_view(sid)
+                except Exception as e:
+                    print(f"[Close] remove_view {sid}: {e}", flush=True)
+        except Exception as e:
+            print(f"[Close] qt views loop: {e}", flush=True)
+        print("[Close] qt views cleanup done", flush=True)
+        print("[Close][Step 2/5] Qt views cleanup end", flush=True)
+
+        print("[Close][Step 3/5] Destroying webview window start", flush=True)
+        # 3) pywebview ウィンドウ破棄
+        print("[Close] destroying webview window", flush=True)
+        try:
+            if webview.windows:
+                webview.windows[0].destroy()
+                print("[Close] webview.destroy() called", flush=True)
+            else:
+                print("[Close] no webview windows", flush=True)
+        except Exception as e:
+            print(f"[Close] webview.destroy error: {e}", flush=True)
+        print("[Close][Step 3/5] Destroying webview window end", flush=True)
+
+        print("[Close][Step 4/5] Calling QApplication.quit() start", flush=True)
+        # 4) QApplication.quit
+        print("[Close] calling QApplication.quit()", flush=True)
+        try:
+            from PySide6.QtWidgets import QApplication
+
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+                print("[Close] QApplication.quit() issued", flush=True)
+            else:
+                print("[Close] no QApplication instance", flush=True)
+        except Exception as e:
+            print(f"[Close] QApplication.quit error: {e}", flush=True)
+        print("[Close][Step 4/5] Calling QApplication.quit() end", flush=True)
+
+        elapsed = time.time() - t0
+        print(f"[Close] closeEvent sequence finished in {elapsed:.2f}s", flush=True)
+
+        print("[Close][Step 5/5] Soft watchdog arming", flush=True)
+        # 5) ソフト保険（メインスレッドに残る場合）: 1.2s 後 os._exit
+        def _soft_exit():
+            time.sleep(1.2)
+            print("[Close] soft watchdog — os._exit(0)", flush=True)
+            os._exit(0)
+
+        threading.Thread(target=_soft_exit, daemon=True, name="close-soft").start()
+        print("[Close] soft watchdog armed (1200ms)", flush=True)
+        print("[Close][Step 5/5] Soft watchdog armed end", flush=True)
     def minimize_window(self):
+        # 最小化前にオーバーレイを隠す
+        if self._electron and self._electron.is_available():
+            try:
+                self._electron.hide_all()
+            except Exception:
+                pass
         if webview.windows:
             webview.windows[0].minimize()
 
@@ -208,31 +530,41 @@ class InkBossAPI:
             webview.windows[0].toggle_fullscreen()
 
     def update_title(self, title):
+        # frameless 時は OS タイトルは見えないが互換のため残す
         w = webview.windows[0] if webview.windows else None
         if w:
-            w.title = title
+            try:
+                w.title = title or "Ink Boss"
+            except Exception:
+                pass
 
     def set_aide_width(self, width):
         self._aide_width_val = int(width)
+        sid = self._bridge.active_id
         w = webview.windows[0] if webview.windows else None
-        if not w or not self._bridge.active_id:
+        if not w or not sid:
+            return
+        if self._service_engine(sid) == "electron":
+            if self._electron and self._electron.is_available():
+                sx, sy, sw, sh = self._screen_rect(w, self._aide_width_val)
+                self._electron.bounds(sid, sx, sy, sw, sh)
             return
         x, y, ww, h = self._get_rect(w, self._aide_width_val)
-        self._bridge.show_view_signal.emit(self._bridge.active_id, x, y, ww, h)
+        self._bridge.show_view_signal.emit(sid, x, y, ww, h)
 
     def get_page_text(self, service_id):
         return self._bridge.page_text_cache.get(service_id, "")
 
     def drag_window(self):
-        pass  # 後方互換
+        pass
 
     def drag_start(self):
-        """ドラッグ開始：キャッシュ済みウィンドウIDでマウス追跡スレッドを起動"""
+        """A1: TopBar ドラッグ。B1: ドラッグ中も Electron を追従。"""
         import subprocess
-        import threading
+        import time
         from bridge import get_win_id
 
-        if getattr(self, "_dragging", False):
+        if self._dragging:
             return
 
         win_id = get_win_id()
@@ -249,7 +581,7 @@ class InkBossAPI:
             r = subprocess.run(
                 ["xdotool", "getmouselocation", "--shell"], capture_output=True, text=True
             )
-            x, y = 0, 0
+            x = y = 0
             for line in r.stdout.splitlines():
                 if line.startswith("X="):
                     x = int(line.split("=")[1])
@@ -260,9 +592,10 @@ class InkBossAPI:
         def _get_win_pos():
             r = subprocess.run(
                 ["xdotool", "getwindowgeometry", "--shell", win_id],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
-            x, y = 0, 0
+            x = y = 0
             for line in r.stdout.splitlines():
                 if line.startswith("X="):
                     x = int(line.split("=")[1])
@@ -273,48 +606,91 @@ class InkBossAPI:
         mx0, my0 = _get_mouse_pos()
         wx0, wy0 = _get_win_pos()
         self._dragging = True
+        # ドラッグ中は Electron を一旦 hide するとズレが目立たないが、
+        # B1 UX は「ついてくる」なので毎フレーム bounds 同期する。
 
         def _drag_loop():
-            import time
-            while getattr(self, "_dragging", False):
+            last_sync = 0.0
+            while self._dragging:
                 mx, my = _get_mouse_pos()
                 dx, dy = mx - mx0, my - my0
                 if dx != 0 or dy != 0:
                     subprocess.run(
-                        ["wmctrl", "-ir", win_id, "-e", f"0,{wx0+dx},{wy0+dy},-1,-1"],
+                        ["wmctrl", "-ir", win_id, "-e", f"0,{wx0 + dx},{wy0 + dy},-1,-1"],
                         check=False,
                     )
+                    # pywebview window.x/y も更新（screen_rect 用）
+                    try:
+                        w = webview.windows[0] if webview.windows else None
+                        if w is not None:
+                            # 内部座標が古いままだと bounds がずれるので
+                            # xdotool の実座標を信頼して screen_rect 側で再計算
+                            pass
+                    except Exception:
+                        pass
+                    now = time.time()
+                    if now - last_sync > 0.016:
+                        last_sync = now
+                        self._sync_overlay_from_win_pos(wx0 + dx, wy0 + dy)
                 time.sleep(0.016)
+            # ドラッグ終了後に最終同期
+            try:
+                wx, wy = _get_win_pos()
+                self._sync_overlay_from_win_pos(wx, wy)
+            except Exception:
+                pass
 
         threading.Thread(target=_drag_loop, daemon=True).start()
 
-    def drag_end(self):
-        self._dragging = False
-
-    def drag_window_by(self, dx, dy):
-        """後方互換：単発移動フォールバック"""
-        import subprocess
+    def _sync_overlay_from_win_pos(self, win_x: int, win_y: int) -> None:
+        sid = self._bridge.active_id
+        if not sid or self._service_engine(sid) != "electron":
+            return
+        if not self._electron or not self._electron.is_available():
+            return
         w = webview.windows[0] if webview.windows else None
         if not w:
             return
-        result = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True)
-        win_id = None
-        for line in result.stdout.splitlines():
-            if "Ink Boss" in line:
-                win_id = line.split()[0]
-                break
-        if win_id:
-            pos_result = subprocess.run(
-                ["xdotool", "getwindowgeometry", "--shell", win_id],
-                capture_output=True, text=True,
-            )
-            x, y = 0, 0
-            for line in pos_result.stdout.splitlines():
-                if line.startswith("X="):
-                    x = int(line.split("=")[1])
-                elif line.startswith("Y="):
-                    y = int(line.split("=")[1])
-            subprocess.run(
-                ["wmctrl", "-ir", win_id, "-e", f"0,{x+int(dx)},{y+int(dy)},-1,-1"],
-                check=False,
-            )
+        from config import SIDEBAR_W, URLBAR_H
+
+        aide = self._aide_width_val
+        ww = max(1, int(getattr(w, "width", 1280) or 1280) - SIDEBAR_W - aide)
+        hh = max(1, int(getattr(w, "height", 850) or 850) - URLBAR_H)
+        sx = int(win_x) + SIDEBAR_W
+        sy = int(win_y) + URLBAR_H
+        try:
+            self._electron.bounds(sid, sx, sy, ww, hh)
+        except Exception:
+            pass
+
+    def drag_end(self):
+        self._dragging = False
+        # 最終位置同期
+        try:
+            self.sync_active_overlay()
+        except Exception:
+            pass
+
+    def drag_window_by(self, dx, dy):
+        import subprocess
+        from bridge import get_win_id
+
+        win_id = get_win_id()
+        if not win_id:
+            return
+        pos = subprocess.run(
+            ["xdotool", "getwindowgeometry", "--shell", win_id],
+            capture_output=True,
+            text=True,
+        )
+        x = y = 0
+        for line in pos.stdout.splitlines():
+            if line.startswith("X="):
+                x = int(line.split("=")[1])
+            elif line.startswith("Y="):
+                y = int(line.split("=")[1])
+        subprocess.run(
+            ["wmctrl", "-ir", win_id, "-e", f"0,{x + int(dx)},{y + int(dy)},-1,-1"],
+            check=False,
+        )
+        self._sync_overlay_from_win_pos(x + int(dx), y + int(dy))
