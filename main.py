@@ -10,6 +10,7 @@ Ink Boss / Ink Inc.
     python3 main.py
 """
 
+import os
 import sys
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -35,7 +36,7 @@ import json # ここを追加
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 
 from config import load_config, save_config
 from bridge import ViewBridge
@@ -69,6 +70,102 @@ def _get_aide_width() -> int:
 def _set_aide_width(val: int) -> None:
     global _aide_width
     _aide_width = val
+
+
+def _get_active_window_id() -> int | None:
+    """現在OSがアクティブとみなしているウィンドウのX11ウィンドウIDを返す。
+    以前は getwindowpid でPIDを取得して比較していたが、Flatpak等でサンド
+    ボックスされたアプリ（例: Ecosia Browser）はPID namespace内の見かけの
+    PID（2, 3等、bwrapのコンテナ内PID）を _NET_WM_PID として報告するため、
+    ホスト側から見ると常に「あり得ない小さいPID」に見えてしまい、判定に
+    使えない（実機で確認済み：これは一時的なレースではなく恒久的な問題）。
+    ウィンドウID自体はサンドボックス下でも正しく採番されるため、
+    「アクティブウィンドウのID」対「自分たちの既知のウィンドウID集合」の
+    比較に切り替える（PID解決を経由しない）。
+    Qtメインスレッドをブロックしないよう短いタイムアウトで打ち切る。"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["xdotool", "getactivewindow"],
+            capture_output=True, text=True, timeout=0.3,
+        )
+        if result.returncode == 0:
+            return int(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def _descendant_pids(root_pid: int) -> set[int]:
+    """root_pid自身と、その子孫プロセスのPID集合を返す（Linux /proc 使用、
+    サブプロセス起動なし）。Electronは node_modules/.bin/electron という
+    起動スクリプトの子プロセスとして実際のブラウザ本体プロセスを起動する
+    ため、electron_engine が保持するPID（起動スクリプト側）単体では、
+    実際にウィンドウを所有する子プロセスのPIDと一致しない。プロセス
+    ツリー全体を辿って初めて正しく判定できる。"""
+    children_map: dict[int, list[int]] = {}
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            try:
+                with open(f"/proc/{pid}/stat", "r") as f:
+                    stat = f.read()
+                after = stat.rsplit(")", 1)[-1].split()
+                ppid = int(after[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            children_map.setdefault(ppid, []).append(pid)
+    except OSError:
+        return {root_pid}
+
+    result = {root_pid}
+    stack = [root_pid]
+    while stack:
+        p = stack.pop()
+        for c in children_map.get(p, []):
+            if c not in result:
+                result.add(c)
+                stack.append(c)
+    return result
+
+
+def _get_own_window_ids(root_pids: set[int]) -> set[int]:
+    """root_pids（自分たち自身のQt本体プロセス・Electronヘルパー起動
+    スクリプトのPID）自身とその子孫プロセス全てが所有するウィンドウIDの
+    集合を返す。自分たち自身のプロセスはサンドボックスされていないため、
+    _NET_WM_PID は正しくホスト側PIDを報告する（wmctrl -lp が信頼できる）。
+    以前は対象PID単体に対して xdotool search --pid していたが、
+    Electronの起動スクリプト→実ブラウザ本体という親子関係を辿れず、
+    実際のウィンドウを見つけられない場合があった（実機で確認済み）。"""
+    all_descendants: set[int] = set()
+    for pid in root_pids:
+        all_descendants |= _descendant_pids(pid)
+
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["wmctrl", "-lp"], capture_output=True, text=True, timeout=0.3,
+        )
+        if result.returncode != 0:
+            return set()
+    except Exception:
+        return set()
+
+    own_ids: set[int] = set()
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 3:
+            continue
+        try:
+            win_id = int(parts[0], 16)
+            win_pid = int(parts[2])
+        except ValueError:
+            continue
+        if win_pid in all_descendants:
+            own_ids.add(win_id)
+    return own_ids
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -232,13 +329,64 @@ def main():
         _orig_set(width)
     api.set_aide_width = _set_aide_width_patched
 
+    def _maybe_hide_foreign_focus_electron(source: str) -> None:
+        """今アクティブなウィンドウが自分たち（Qt本体 or Electron）以外の
+        場合にのみ hide_all() する。ElectronウィンドウはOS上は別プロセス
+        の別ウィンドウなので、その中身（ログインボタン等）をクリックする
+        行為自体が「Qtアプリがフォーカスを失った」というApplicationInactive
+        を発生させる。これは「無関係な外部アプリに切り替えた」場合と
+        区別できないため、無条件でhide_all()すると、Electron内をクリック
+        しただけで自分自身を隠してしまう自滅ループになる。
+        判定は「アクティブウィンドウのID」対「自分たち（Qt本体・
+        Electron）が所有する既知のウィンドウID集合」の比較で行う
+        （PIDは経由しない）。以前はPIDで判定していたが、Flatpak等で
+        サンドボックスされた外部アプリ（例: Ecosia Browser）は
+        _NET_WM_PID にコンテナ内の見かけのPID（2, 3等）を報告するため、
+        「無関係な外部アプリ」を正しくPIDで識別できないことが実機で
+        判明した。ウィンドウIDそのものはサンドボックス下でも正しく
+        採番されるため、この方式に切り替えている。
+        active_window_id が None（xdotool失敗等で判定不能）の場合も、
+        hide_all()による誤爆を避けるため「隠さない」側に倒す
+        （節電目的のhideを多少逃すのは実害が小さいが、誤ってhide
+        すると暗転バグになるため）。"""
+        import time as _time
+        _ts = _time.time()
+        if not (electron_engine and electron_engine.is_available() and electron_engine.active_sid):
+            print(f"[DIAG-FOCUS] {_ts:.3f} source={source} skipped: no active electron service", flush=True)
+            return
+        active_id = _get_active_window_id()
+        if active_id is None:
+            print(f"[DIAG-FOCUS] {_ts:.3f} source={source} active_window_id=None (undetermined) — not hiding", flush=True)
+            return
+        root_pids = {os.getpid()}
+        electron_pid = electron_engine.pid
+        if electron_pid:
+            root_pids.add(electron_pid)
+        own_ids = _get_own_window_ids(root_pids)
+        if active_id in own_ids:
+            print(f"[DIAG-FOCUS] {_ts:.3f} source={source} active_window_id={active_id} is our own window — not hiding", flush=True)
+            return
+        print(f"[DIAG-FOCUS] {_ts:.3f} source={source} active_window_id={active_id} is foreign — hiding", flush=True)
+        print(f"[main] Foreign focus detected (source={source}, active_window_id={active_id}). Hiding all Electron windows.", flush=True)
+        electron_engine.hide_all() # 全てのElectronウィンドウを非表示にする
+
     # Qtアプリケーションのアクティブ状態変更を監視
     def _on_application_state_changed(state):
         # QApplicationは既にインポートされている
         # Qtは既にインポートされている
         # Qt.ApplicationActive は、ウィンドウがフォアグラウンドにある状態
         if state == Qt.ApplicationState.ApplicationActive:
-            if electron_engine and electron_engine.is_available() and electron_engine.active_sid:
+            if (
+                electron_engine
+                and electron_engine.is_available()
+                and electron_engine.active_sid
+                and not electron_engine.is_shown
+            ):
+                # 既に表示中なら何もしない。ここで毎回 show() を呼ぶと
+                # Node側 showService() の win.focus() がOSフォーカスを奪い、
+                # メインQtウィンドウが Inactive → hide_all → 復帰後また
+                # Active → show()… という自己増殖ループになり得るため
+                # （win.focus()自体は新規表示時のキーボード入力に必要なので残す）。
                 print(f"[main] App active. Showing Electron '{electron_engine.active_sid}'.", flush=True)
                 # api.show_service は ElectronService 側で show を呼ぶのでこれを使う
                 # ただし、api.show_service は bounds の計算も伴うため、Qt側の main_window が active でないとダメ
@@ -248,12 +396,24 @@ def main():
                 electron_engine.show(electron_engine.active_sid, "", 0, 0, 0, 0) # ダミーのbounds
         # Qt.ApplicationInactive は、ウィンドウがバックグラウンドにある状態
         elif state == Qt.ApplicationState.ApplicationInactive:
-            if electron_engine and electron_engine.is_available() and electron_engine.active_sid:
-                print(f"[main] App inactive. Hiding all Electron windows.", flush=True)
-                electron_engine.hide_all() # 全てのElectronウィンドウを非表示にする
+            _maybe_hide_foreign_focus_electron("applicationStateChanged")
 
     qt_app.applicationStateChanged.connect(_on_application_state_changed)
     print("[main] applicationStateChanged listener connected.", flush=True)
+
+    # applicationStateChanged は Active⇔Inactive の「変化」時にのみ発火する。
+    # Electron内クリックで既にInactiveのまま留まっている状態から、さらに
+    # 無関係な外部アプリへ直接切り替えた場合は、Inactive→Inactiveで変化が
+    # ないため signal が再発火せず、hide_all() が呼ばれないまま Electron
+    # ウィンドウ（alwaysOnTop）が他アプリの上に残ってしまう問題があった。
+    # そのため、Electron表示中のみ軽量なポーリングで補完する。
+    _electron_focus_poll_timer = QTimer(qt_app)
+    _electron_focus_poll_timer.setInterval(1000)
+    _electron_focus_poll_timer.timeout.connect(
+        lambda: _maybe_hide_foreign_focus_electron("poll") if electron_engine and electron_engine.is_shown else None
+    )
+    _electron_focus_poll_timer.start()
+    print("[main] Electron focus poll timer started (1000ms, active only while shown).", flush=True)
 
     # DEBインストール版かどうかを自動判定
     import os, http.server, socketserver, threading, atexit

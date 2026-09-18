@@ -73,6 +73,18 @@ function createServiceWindow(sid, url, opts = {}) {
     frame: false,
     backgroundColor: "#080810",
     skipTaskbar: true,
+    // 位置・サイズはQt側からのapplyBounds呼び出しのみで制御する設計
+    // （B1: reparentせず毎フレームbounds同期）。resizable未指定だと
+    // frame:falseでもOS側のウィンドウ端ドラッグでユーザーが自由に
+    // リサイズできてしまい、設計から逸脱する（hide_all()に不具合が
+    // 再発した場合、任意サイズに拡大されたこのウィンドウが画面全体を
+    // 覆い操作不能になるリスクもある）。
+    resizable: false,
+    // skipTaskbar（_NET_WM_STATE_SKIP_TASKBAR）だけではBudgie/Mutter系WMで
+    // タスクバーに別アイコンが出るのを実機で確認したため、Linux専用の
+    // ウィンドウタイプヒントでも「タスクバーに出すべきでない補助ウィンドウ」
+    // であることを伝える。
+    type: "utility",
     autoHideMenuBar: true,
     focusable: true,
     alwaysOnTop: true,
@@ -88,6 +100,13 @@ function createServiceWindow(sid, url, opts = {}) {
       spellcheck: true,
     },
   });
+
+  // コンストラクタの skipTaskbar オプションだけでは、Linuxの一部の
+  // ウィンドウマネージャー（Budgie/Mutter等）で _NET_WM_STATE_SKIP_TASKBAR
+  // が実際には付与されないことを実機で確認したため、明示的にも呼ぶ。
+  try {
+    win.setSkipTaskbar(true);
+  } catch (_) {}
 
   try {
     win.webContents.setUserAgent(ua);
@@ -160,7 +179,20 @@ function showService(sid, bounds) {
   const win = windows.get(sid);
   if (!win || win.isDestroyed()) return { ok: false, error: "not_found" };
 
-  hideAllExcept(sid);
+  // show_service 自体を冪等にする。
+  // Electronの BrowserWindow.show() は公式ドキュメント上も
+  // 「表示してフォーカスを与える」処理であり、既に表示・アクティブ済みの
+  // ウィンドウに対して再度呼ぶだけでOS/WM側のフォーカスイベントが
+  // 再発火しうる（特に type:'utility' + focusable:true は、WM自身が
+  // map時に自動でフォーカスを付与することがあり、Electron側の
+  // isFocused() チェックでは検知できない）。
+  // 対象sidが既にactiveかつ可視状態なら、show()/focus() 自体を
+  // 呼ばずに座標更新だけ行う。
+  const alreadyActive = activeId === sid && win.isVisible() && !hibernated.has(sid);
+
+  if (!alreadyActive) {
+    hideAllExcept(sid);
+  }
   applyBounds(win, bounds);
 
   if (hibernated.has(sid)) {
@@ -171,9 +203,18 @@ function showService(sid, bounds) {
     }
   }
 
-  win.show();
-  win.focus();
-  win.setFullScreen(false);
+  if (!alreadyActive) {
+    win.show();
+    // 一部WMは skipTaskbar をマップ前に設定しても無視するため、
+    // 表示（マップ）後にも再度呼んで確実にタスクバーへ出さないようにする。
+    try {
+      win.setSkipTaskbar(true);
+    } catch (_) {}
+    if (!win.isFocused()) {
+      win.focus();
+    }
+    win.setFullScreen(false);
+  }
   activeId = sid;
   return { ok: true, sid };
 }
@@ -352,31 +393,90 @@ async function handleRequest(req, res) {
     if (req.method === "POST" && route === "/shutdown") {
       // 先にレスポンスを返して Python 側をブロックさせない
       sendJson(res, 200, { ok: true });
-      console.error("[electron-engine] /shutdown received — quitting");
+      console.error(`[electron-engine] [SHUTDOWN] ${Date.now()} /shutdown received — flushing sessions then quitting`);
       app.isQuitting = true;
-      // セッション flush: ビュー破棄 → 少し待って quit
-      try {
-        for (const [, win] of windows) {
+
+      const FLUSH_TIMEOUT_MS = 2000;
+
+      // 1サービス分のセッションをディスクへflush。
+      // flushStorageData() はコールバック/Promiseを返さない fire-and-forget
+      // API のため待てない。cookies.flushStore() はPromiseを返すのでそちらを
+      // 待ち、両方合わせて FLUSH_TIMEOUT_MS でタイムアウトさせる
+      // （①の教訓通り、無限待機は避ける）。
+      const flushWindow = (sid, win) =>
+        new Promise((resolve) => {
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            resolve();
+          };
+          const timer = setTimeout(() => {
+            console.error(`[electron-engine] [SHUTDOWN] flush timeout sid=${sid}`);
+            finish();
+          }, FLUSH_TIMEOUT_MS);
           try {
-            if (win && !win.isDestroyed()) win.destroy();
+            const ses = win.webContents.session;
+            try {
+              ses.flushStorageData();
+            } catch (e) {
+              console.error(`[electron-engine] [SHUTDOWN] flushStorageData error sid=${sid}: ${e}`);
+            }
+            Promise.resolve(ses.cookies.flushStore())
+              .then(() => {
+                console.error(`[electron-engine] [SHUTDOWN] flush complete sid=${sid}`);
+              })
+              .catch((e) => {
+                console.error(`[electron-engine] [SHUTDOWN] cookies.flushStore error sid=${sid}: ${e}`);
+              })
+              .finally(() => {
+                clearTimeout(timer);
+                finish();
+              });
+          } catch (e) {
+            console.error(`[electron-engine] [SHUTDOWN] flush setup error sid=${sid}: ${e}`);
+            clearTimeout(timer);
+            finish();
+          }
+        });
+
+      const entries = Array.from(windows.entries()).filter(
+        ([, win]) => win && !win.isDestroyed()
+      );
+
+      Promise.all(entries.map(([sid, win]) => flushWindow(sid, win)))
+        .then(() => {
+          console.error(`[electron-engine] [SHUTDOWN] all sessions flushed (or timed out) — closing windows`);
+        })
+        .finally(() => {
+          for (const [sid, win] of entries) {
+            try {
+              if (win && !win.isDestroyed()) {
+                win.close(); // destroy() ではなく通常の終了フローを通す
+              }
+            } catch (e) {
+              console.error(`[electron-engine] [SHUTDOWN] close error sid=${sid}: ${e}`);
+            }
+          }
+          windows.clear();
+          try {
+            if (server) server.close();
           } catch (_) {}
-        }
-        windows.clear();
-      } catch (_) {}
-      // サーバーも閉じる
-      try {
-        if (server) server.close();
-      } catch (_) {}
-      // 短時間で quit。ハングしても親が kill する
+          setTimeout(() => {
+            console.error(`[electron-engine] [SHUTDOWN] ${Date.now()} calling app.quit()`);
+            try {
+              app.quit();
+            } catch (_) {
+              process.exit(0);
+            }
+          }, 50);
+        });
+
+      // 最終保険: flush・close・quitのどこがハングしても必ず終了する
       setTimeout(() => {
-        try {
-          app.quit();
-        } catch (_) {
-          process.exit(0);
-        }
-      }, 100);
-      // 最終保険
-      setTimeout(() => process.exit(0), 1500);
+        console.error(`[electron-engine] [SHUTDOWN] ${Date.now()} HARD process.exit(0) (safety deadline)`);
+        process.exit(0);
+      }, FLUSH_TIMEOUT_MS + 1500);
       return;
     }
     return sendJson(res, 404, { ok: false, error: "not_found" });
@@ -409,7 +509,17 @@ app.on("window-all-closed", (e) => {
 });
 
 app.on("before-quit", () => {
+  console.error(`[electron-engine] [DIAG-SHUTDOWN] ${Date.now()} before-quit event fired`);
   app.isQuitting = true;
+});
+app.on("will-quit", () => {
+  console.error(`[electron-engine] [DIAG-SHUTDOWN] ${Date.now()} will-quit event fired`);
+});
+app.on("quit", () => {
+  console.error(`[electron-engine] [DIAG-SHUTDOWN] ${Date.now()} quit event fired`);
+});
+process.on("exit", (code) => {
+  console.error(`[electron-engine] [DIAG-SHUTDOWN] ${Date.now()} process 'exit' event, code=${code}`);
 });
 
 process.on("SIGTERM", () => {

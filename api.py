@@ -57,8 +57,11 @@ class InkBossAPI:
         return wx + x, wy + y, w, h
 
     def _hide_other_engine(self, keep: str) -> None:
+        import time as _t
+        print(f"[TIMING2] {_t.time():.3f} _hide_other_engine(keep={keep!r}) called", flush=True)
         if keep != "qt":
             try:
+                print(f"[TIMING2] {_t.time():.3f} _hide_other_engine: emitting hide_all_signal (keep={keep!r} != 'qt')", flush=True)
                 self._bridge.hide_all_signal.emit()
             except Exception as e:
                 print(f"[api] hide qt failed: {e}", flush=True)
@@ -211,6 +214,8 @@ class InkBossAPI:
         return new_svc
 
     def show_service(self, sid):
+        import time as _t
+        print(f"[TIMING2] {_t.time():.3f} show_service({sid}) CALLED, hibernated={sid in self._bridge.hibernated}", flush=True)
         w = webview.windows[0] if webview.windows else None
         if not w:
             return

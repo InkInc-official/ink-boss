@@ -73,10 +73,18 @@ class ElectronEngine:
         self._failed = False
         self._stderr_tail: list[str] = []
         self.active_sid: str | None = None
+        # active_sid は hide_all() 等で None にクリアされる（「今どのsidが
+        # 対象か」の意味）ため、「今まさにウィンドウが表示されているか」を
+        # 別途持つ。applicationStateChanged からの重複 show() 抑止に使う。
+        self.is_shown: bool = False
 
     @property
     def port(self) -> int | None:
         return self._port
+
+    @property
+    def pid(self) -> int | None:
+        return self._proc.pid if self._proc is not None else None
 
     def is_available(self) -> bool:
         if self._failed or self._port is None:
@@ -165,7 +173,7 @@ class ElectronEngine:
                 if len(self._stderr_tail) > 40:
                     self._stderr_tail = self._stderr_tail[-40:]
                 low = line.lower()
-                if any(k in low for k in ("error", "fail", "ready", "listening", "created")):
+                if any(k in low for k in ("error", "fail", "ready", "listening", "created", "shutdown", "quit")):
                     print(f"[electron-engine:err] {line}", flush=True)
         except Exception:
             pass
@@ -245,6 +253,7 @@ class ElectronEngine:
             self._port = None
             self._proc = None
             self.active_sid = None
+            self.is_shown = False
             print("[Close] electron shutdown done", flush=True)
 
     def _base(self) -> str:
@@ -278,10 +287,12 @@ class ElectronEngine:
         )
         if r.get("ok"):
             self.active_sid = sid
+            self.is_shown = True
         return r
 
     def hide_all(self) -> dict:
         self.active_sid = None
+        self.is_shown = False
         return self._post("/hide_all", {})
 
     def bounds(self, sid: str, x: int, y: int, w: int, h: int) -> dict:
@@ -294,6 +305,7 @@ class ElectronEngine:
     def hibernate(self, sid: str) -> dict:
         if self.active_sid == sid:
             self.active_sid = None
+            self.is_shown = False
         return self._post("/hibernate", {"sid": sid})
 
     def wake(self, sid: str, url: str) -> dict:
@@ -305,6 +317,7 @@ class ElectronEngine:
     def remove(self, sid: str) -> dict:
         if self.active_sid == sid:
             self.active_sid = None
+            self.is_shown = False
         return self._post("/remove", {"sid": sid})
 
     def get_hibernated_ids(self) -> list[str]:

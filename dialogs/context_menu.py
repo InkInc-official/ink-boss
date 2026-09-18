@@ -50,6 +50,7 @@ def show_service_context_menu(
     wake_view_fn, hibernate_view_fn,
     create_view_fn,
     remove_view_fn=None,
+    navigate_view_fn=None,
     active_menu_holder: list | None = None,
 ) -> None:
     if active_menu_holder and active_menu_holder[0]:
@@ -66,6 +67,7 @@ def show_service_context_menu(
 
     rename_a = menu.addAction("名前を変更")
     icon_a = menu.addAction("アイコンを変更…")
+    url_a = menu.addAction("URLを変更…")
     menu.addSeparator()
 
     move_map, copy_map = {}, {}
@@ -107,6 +109,8 @@ def show_service_context_menu(
         _do_rename(sid, name, config, js_eval_fn)
     elif action == icon_a:
         _do_change_icon(sid, config, js_eval_fn)
+    elif action == url_a:
+        _do_change_url(sid, (svc or {}).get("url", ""), config, js_eval_fn, navigate_view_fn)
     elif action == switch_a:
         _do_toggle_engine(sid, name, config, js_eval_fn)
     elif action == delete_a:
@@ -232,6 +236,60 @@ def _do_change_icon(sid: str, config: dict, js_eval_fn) -> None:
         f"window.dispatchEvent(new CustomEvent('service-icon-changed',"
         f"{{detail:{{id:{json.dumps(sid)},icon:{json.dumps(icon_url)}}}}}))"
     )
+
+
+def _do_change_url(sid: str, current_url: str, config: dict, js_eval_fn, navigate_fn) -> None:
+    """URLを変更。ビュー（QWebEngineProfile / Electronのpartition）自体は
+    sid単位で管理されているため、URLを変えるだけでは再作成されず、
+    既存のセッション（Cookie/LocalStorage）は維持されたまま新URLに
+    遷移する。"""
+    dialog = QDialog()
+    dialog.setWindowTitle("URLを変更")
+    dialog.setMinimumWidth(420)
+    dialog.setStyleSheet(DIALOG_STYLE)
+    dialog.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+    layout = QVBoxLayout(dialog)
+    layout.setSpacing(12)
+    layout.setContentsMargins(24, 24, 24, 24)
+    layout.addWidget(QLabel("新しいURL"))
+    url_input = QLineEdit(current_url)
+    layout.addWidget(url_input)
+    btn_layout = QHBoxLayout()
+    cancel_btn = QPushButton("キャンセル")
+    ok_btn = QPushButton("変更")
+    ok_btn.setObjectName("addBtn")
+    btn_layout.addWidget(cancel_btn)
+    btn_layout.addWidget(ok_btn)
+    layout.addLayout(btn_layout)
+    cancel_btn.clicked.connect(dialog.reject)
+
+    def on_ok():
+        new_url = url_input.text().strip()
+        if not new_url:
+            dialog.reject()
+            return
+        if not new_url.startswith("http"):
+            new_url = f"https://{new_url}"
+        for s in config["services"]:
+            if s["id"] == sid:
+                s["url"] = new_url
+                break
+        save_config(config)
+        if navigate_fn:
+            try:
+                navigate_fn(sid, new_url)
+            except Exception as e:
+                print(f"[url] navigate failed: {e}", flush=True)
+        js_eval_fn(
+            f"window.dispatchEvent(new CustomEvent('service-url-changed',"
+            f"{{detail:{{id:{json.dumps(sid)},url:{json.dumps(new_url)}}}}}))"
+        )
+        dialog.accept()
+
+    ok_btn.clicked.connect(on_ok)
+    url_input.setFocus()
+    url_input.selectAll()
+    dialog.exec()
 
 
 def _do_toggle_engine(sid: str, name: str, config: dict, js_eval_fn) -> None:

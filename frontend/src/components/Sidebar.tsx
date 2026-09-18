@@ -36,6 +36,12 @@ export default function Sidebar() {
         services: s.services.map((sv) => (sv.id === id ? { ...sv, icon } : sv)),
       }));
     };
+    const onUrlChanged = (e: CustomEvent) => {
+      const { id, url } = e.detail;
+      useAppStore.setState((s) => ({
+        services: s.services.map((sv) => (sv.id === id ? { ...sv, url } : sv)),
+      }));
+    };
     const onEngine = (e: CustomEvent) => {
       const { id, engine } = e.detail;
       void updateService(id, { engine });
@@ -79,6 +85,7 @@ export default function Sidebar() {
       ["service-removed", onRemoved as EventListener],
       ["service-renamed", onRenamed as EventListener],
       ["service-icon-changed", onIcon as EventListener],
+      ["service-url-changed", onUrlChanged as EventListener],
       ["service-engine-changed", onEngine as EventListener],
       ["service-added", onAdded as EventListener],
       ["group-added", onGroupAdded as EventListener],
@@ -290,6 +297,15 @@ export default function Sidebar() {
               </div>
             );
           })}
+          {/* 未分類サービスの見出し。
+              グループが1つ以上ある状態でこれが無いと、新規グループの
+              直後に未分類サービスが続くため、そのグループに属している
+              ように見えてしまう（データ上は正しくても視覚的に誤解される）。 */}
+          {groups.length > 0 && ungrouped.length > 0 && (
+            <div className="flex items-center gap-1.5 px-2 py-1 mb-0.5 mt-2 pt-2 border-t border-white/5 select-none">
+              {expanded && <span className="flex-1 text-[10px] font-mono uppercase tracking-[0.15em] text-white/25 truncate">未分類</span>}
+            </div>
+          )}
           {/* 未分類サービス → ドロップゾーンとしても機能 */}
           <div onDragOver={(e) => e.preventDefault()}
                onDrop={(e) => {
