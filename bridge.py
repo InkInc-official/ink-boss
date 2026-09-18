@@ -768,14 +768,33 @@ class ViewBridge(QObject):
             active_menu_holder=self._active_menu_holder,
         )
 
+    def _show_dialog_with_electron_hidden(self, dialog_fn) -> None:
+        """ダイアログ表示中、ElectronウィンドウがalwaysOnTopのせいで
+        ネイティブダイアログの上に被って操作不能になる問題への対策。
+        Electronが現在表示中であれば一旦hide_all()してからダイアログを
+        開き、閉じた後（追加完了/キャンセルいずれでも）元のサービスを
+        再表示する。座標はダミー値（main.pyのapplicationStateChanged
+        復帰時と同じパターン）で、既存のウィンドウ位置はそのまま
+        維持される（新規ナビゲーションも発生しない）。"""
+        electron = getattr(self, "electron", None)
+        was_shown = bool(electron and electron.is_shown)
+        prev_sid = electron.active_sid if was_shown else None
+        if was_shown:
+            electron.hide_all()
+        try:
+            dialog_fn()
+        finally:
+            if was_shown and prev_sid:
+                electron.show(prev_sid, "", 0, 0, 0, 0)
+
     @Slot(str)
     def _show_add_dialog(self, group_id_str: str):
-        show_add_service_dialog(
+        self._show_dialog_with_electron_hidden(lambda: show_add_service_dialog(
             config=self.config,
             js_eval_fn=js_eval,
             create_view_fn=self._create_view,
             group_id=group_id_str,
-        )
+        ))
 
     def open_add_service_with_url(self, url: str) -> None:
         """ページ内右クリック「Ink Bossに追加」から呼ばれる。既存の
@@ -784,12 +803,12 @@ class ViewBridge(QObject):
         Qt側は _CustomView.contextMenuEvent からQtメインスレッド上で
         直接呼ばれる。Electron側は electron_add_service_signal 経由
         （バックグラウンドスレッド→QueuedConnectionでこのメソッドへ）。"""
-        show_add_service_dialog(
+        self._show_dialog_with_electron_hidden(lambda: show_add_service_dialog(
             config=self.config,
             js_eval_fn=js_eval,
             create_view_fn=self._create_view,
             initial_url=url,
-        )
+        ))
 
     @Slot()
     def _show_settings(self):
