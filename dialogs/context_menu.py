@@ -7,6 +7,7 @@ Ink Boss / Ink Inc.
 - 削除時は remove_view（hibernate ではない）
 """
 
+import base64
 import json
 import uuid
 from pathlib import Path
@@ -206,6 +207,41 @@ def _do_rename(sid: str, current_name: str, config: dict, js_eval_fn) -> None:
     dialog.exec()
 
 
+_ICON_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".svg": "image/svg+xml",
+}
+
+_ICON_TARGET_SIZE = (128, 128)
+
+
+def _build_icon_data_uri(image_bytes: bytes) -> str | None:
+    """アイコン画像をdata URI化する前に128x128へリサイズする。
+    サイドバーでの実際の表示サイズは20〜28px程度しかなく、元画像を
+    そのままbase64埋め込みすると、選んだファイルのサイズによっては
+    config.jsonが数MB規模に肥大化する（実機で確認済み: 約2.3MBの
+    画像1枚でconfig.jsonが約3.1MBになり、無関係な変更のたびに呼ばれる
+    save_config()が平均176ms・最大576ms かかるようになっていた）。
+    ImageOps.fit でアスペクト比を保ったまま中央トリミング＋縮小し、
+    透過を保持できるPNGとして書き出す。"""
+    try:
+        from PIL import Image, ImageOps
+        import io
+        img = Image.open(io.BytesIO(image_bytes))
+        img = img.convert("RGBA")
+        fitted = ImageOps.fit(img, _ICON_TARGET_SIZE, Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        fitted.save(buf, format="PNG", optimize=True)
+        return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+    except Exception as e:
+        print(f"[icon] resize failed: {e}", flush=True)
+        return None
+
+
 def _do_change_icon(sid: str, config: dict, js_eval_fn) -> None:
     """ローカル画像を選んで services[].icon に保存。"""
     path, _ = QFileDialog.getOpenFileName(
@@ -219,14 +255,31 @@ def _do_change_icon(sid: str, config: dict, js_eval_fn) -> None:
     icons_dir = CONFIG_DIR / "icons"
     icons_dir.mkdir(parents=True, exist_ok=True)
     src = Path(path)
-    dest = icons_dir / f"{sid}{src.suffix.lower() or '.png'}"
+    suffix = src.suffix.lower() or ".png"
+    dest = icons_dir / f"{sid}{suffix}"
     try:
-        dest.write_bytes(src.read_bytes())
+        data = src.read_bytes()
+        # ディスクには元の高解像度のまま保存する（将来用途・互換性のため。
+        # config.jsonと違い都度読み書きされるものではないため、容量面の
+        # 懸念は小さいと判断）。
+        dest.write_bytes(data)
     except Exception as e:
         print(f"[icon] copy failed: {e}", flush=True)
         return
-    # file:// URL でフロント img に渡す
-    icon_url = dest.resolve().as_uri()
+    # file:// URL はフロントエンド（http://127.0.0.1:<port>で配信）から
+    # 見るとクロスオリジンのローカルリソースになり、Chromiumのセキュリティ
+    # 制限で読み込めない（"Not allowed to load local resource" エラー。
+    # 実機で確認済み）。そのためdata URI（base64埋め込み）に変換して渡す。
+    # data URIはオリジン制限を受けず、かつサーバーのポート番号（起動の
+    # たびに変わる）にも依存しないため、config.json保存後の再起動でも
+    # そのまま有効。表示用にはリサイズ後の軽量なdata URIを使い、
+    # config.jsonの肥大化・保存の遅延を避ける。リサイズに失敗した場合
+    # （壊れた画像等）のみ、元データをそのままdata URI化するフォール
+    # バックとする。
+    icon_url = _build_icon_data_uri(data)
+    if icon_url is None:
+        mime = _ICON_MIME_TYPES.get(suffix, "application/octet-stream")
+        icon_url = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
     for s in config.get("services", []):
         if s["id"] == sid:
             s["icon"] = icon_url

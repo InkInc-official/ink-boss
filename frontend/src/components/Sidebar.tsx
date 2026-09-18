@@ -46,6 +46,28 @@ export default function Sidebar() {
       const { id, engine } = e.detail;
       void updateService(id, { engine });
     };
+    const onMoved = (e: CustomEvent) => {
+      // 右クリックメニュー「グループに移動」用。config.json側は正しく
+      // 更新されるが、この購読が無いとサイドバーが再描画されず、
+      // 見た目上「移動できない」ように見えていた（実機で確認済み）。
+      const { id, groupId } = e.detail;
+      useAppStore.setState((s) => ({
+        services: s.services.map((sv) => (sv.id === id ? { ...sv, groupId: groupId || undefined } : sv)),
+      }));
+    };
+    const onCopied = (e: CustomEvent) => {
+      // 右クリックメニュー「グループにコピー」用。同様にconfig.json側は
+      // 正しく更新されるが、購読が無く新しいサービスが一覧に現れない
+      // ままだった（実機で確認済み）。
+      const svc = e.detail;
+      useAppStore.setState((s) => {
+        if (s.services.some((x) => x.id === svc.id)) return s;
+        return {
+          services: [...s.services, svc],
+          hibernatedIds: new Set([...s.hibernatedIds, svc.id]),
+        };
+      });
+    };
     const onAdded = (e: CustomEvent) => {
       const svc = e.detail;
       useAppStore.setState((s) => {
@@ -87,6 +109,8 @@ export default function Sidebar() {
       ["service-icon-changed", onIcon as EventListener],
       ["service-url-changed", onUrlChanged as EventListener],
       ["service-engine-changed", onEngine as EventListener],
+      ["service-moved", onMoved as EventListener],
+      ["service-copied", onCopied as EventListener],
       ["service-added", onAdded as EventListener],
       ["group-added", onGroupAdded as EventListener],
       ["group-removed", onGroupRemoved as EventListener],
@@ -173,8 +197,18 @@ export default function Sidebar() {
     const eng = service.engine === "electron" ? "E" : "Q";
     return (
       <button draggable
-        onDragStart={() => handleServiceDragStart(service.id, groupId ?? service.groupId)}
-        onDragOver={(e) => { e.preventDefault(); }}
+        onDragStart={(e) => {
+          // グループ内サービスの場合、この<button>は親グループの
+          // draggable な<div>（317行目付近）の子孫にあたる。
+          // stopPropagationしないとdragstartが親までバブリングし、
+          // 親のonDragStartが後から発火して dragService.current を
+          // 上書き・グループID自体をドラッグ対象にしてしまい、結果
+          // 「サービス単体ではなくグループごと動く」不具合になって
+          // いた（実機で確認済み）。
+          e.stopPropagation();
+          handleServiceDragStart(service.id, groupId ?? service.groupId);
+        }}
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
         onDrop={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -184,6 +218,12 @@ export default function Sidebar() {
         onDoubleClick={() => handleServiceDoubleClick(service)}
         onContextMenu={(e) => {
           e.preventDefault();
+          // 同様に、グループ内サービスでは右クリックのcontextmenu
+          // イベントも親グループのonContextMenuまでバブリングし、
+          // サービス用のフルメニューを開いた直後にグループ用の
+          // 簡易メニュー（名前を変更/削除の2項目のみ）が上書き表示
+          // されてしまっていた（実機で確認済み）。
+          e.stopPropagation();
           const isHib = hibernatedIds.has(service.id);
           const otherGroups = groups.filter((g) => g.id !== service.groupId);
           const groupsJson = JSON.stringify(otherGroups.map((g) => ({ id: g.id, name: g.name })));
