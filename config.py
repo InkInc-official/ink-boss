@@ -37,9 +37,10 @@ DEFAULT_CONFIG: dict = {
     "llm": {
         "backend": "ollama",
         "ollamaUrl": "http://localhost:11434",
-        "ollamaModel": "llama3",
+        "ollamaModel": "qwen2.5:3b",
         "claudeApiKey": "",
         "geminiApiKey": "",
+        "deepseekApiKey": "",
     },
     "hibernate_minutes": 10,
     "services": [],

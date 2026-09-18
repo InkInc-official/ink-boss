@@ -13,10 +13,11 @@ import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 ENGINE_DIR = Path(__file__).resolve().parent / "electron-engine"
 READY_PREFIX = "INK_ELECTRON_READY port="
+ADD_SERVICE_PREFIX = "INK_ELECTRON_ADD_SERVICE "
 START_TIMEOUT_S = 25.0
 
 
@@ -77,6 +78,11 @@ class ElectronEngine:
         # 対象か」の意味）ため、「今まさにウィンドウが表示されているか」を
         # 別途持つ。applicationStateChanged からの重複 show() 抑止に使う。
         self.is_shown: bool = False
+        # ページ内右クリック「Ink Bossに追加」用。main.js がstdoutに
+        # INK_ELECTRON_ADD_SERVICE <url> を出力したときに呼ばれる
+        # （バックグラウンドスレッドから呼ばれるため、呼び出し側で
+        # Qtメインスレッドへの受け渡しを行うこと）。
+        self.on_add_service_requested: Callable[[str], None] | None = None
 
     @property
     def port(self) -> int | None:
@@ -159,6 +165,13 @@ class ElectronEngine:
                         self._ready.set()
                     except ValueError:
                         pass
+                elif line.startswith(ADD_SERVICE_PREFIX):
+                    url = line[len(ADD_SERVICE_PREFIX) :].strip()
+                    if url and self.on_add_service_requested:
+                        try:
+                            self.on_add_service_requested(url)
+                        except Exception:
+                            pass
                 elif line:
                     print(f"[electron-engine] {line}", flush=True)
         except Exception:
@@ -324,6 +337,15 @@ class ElectronEngine:
         r = self._get("/hibernated")
         if r.get("ok"):
             return list(r.get("ids") or [])
+        return []
+
+    def get_awake_ids(self) -> list[str]:
+        """実際にウィンドウが生成・ロード済み（休止ではない）のsid一覧。
+        起動時に一度もcreate/showされていないサービスはここに含まれない
+        （= 呼び出し側で「休止扱い」として解釈すべき）。"""
+        r = self._get("/hibernated")
+        if r.get("ok"):
+            return list(r.get("awake") or [])
         return []
 
     def health(self) -> dict[str, Any]:

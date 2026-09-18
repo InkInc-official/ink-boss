@@ -17,7 +17,7 @@ export interface Group {
   collapsed: boolean;
 }
 
-export type LLMBackend = "ollama" | "claude" | "gemini";
+export type LLMBackend = "ollama" | "claude" | "gemini" | "deepseek";
 
 export interface LLMConfig {
   backend: LLMBackend;
@@ -25,6 +25,7 @@ export interface LLMConfig {
   ollamaModel: string;
   claudeApiKey: string;
   geminiApiKey: string;
+  deepseekApiKey: string;
 }
 
 export interface AppConfig {

@@ -302,13 +302,30 @@ class InkBossAPI:
             self._bridge.wake_view_signal.emit(sid, url)
 
     def get_hibernated_ids(self):
-        ids = set(self._bridge.hibernated)
+        """「休止していないサービス（＝実際にロード済みで起動が重い
+        原因になりうるもの）」を差し引く方式で計算する。
+
+        以前は「明示的に休止済みと記録されているsid」を集める方式
+        だったが、_init_views は起動時にQtサービスのみ作成し
+        Electronサービスは一切作成しない設計（重い処理を避けるための
+        意図的なlazy化）のため、起動直後で一度もクリックされていない
+        Electronサービスはそもそも main.js の hibernated セットに
+        存在せず、「休止していない」と誤判定されていた。実機で確認した
+        ところ、グループに属しているかどうかとは無関係に、Electron
+        エンジンのサービス全般でこの誤判定が起きていた（ユーザーの
+        環境ではグループ内サービスにElectronエンジンが多かったため
+        「グループのサービスだけ休止しない」ように見えていたと推測）。
+        設定にある全サービスから「実際に起動中(awake)」なものを
+        差し引くことで、一度も触られていないサービスは常に休止扱いに
+        なるよう修正した。"""
+        all_ids = {s["id"] for s in self._config.get("services", [])}
+        awake_ids = {sid for sid in self._bridge.views if sid not in self._bridge.hibernated}
         if self._electron and self._electron.is_available():
             try:
-                ids.update(self._electron.get_hibernated_ids())
+                awake_ids.update(self._electron.get_awake_ids())
             except Exception:
                 pass
-        return list(ids)
+        return list(all_ids - awake_ids)
 
     def reload_service(self, sid):
         if self._service_engine(sid) == "electron":

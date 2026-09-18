@@ -60,6 +60,10 @@ bridge = ViewBridge(qt_app, config)
 # 第15章: Electron 常駐ヘルパー（失敗しても Qt のみで継続）
 electron_engine = ElectronEngine()
 bridge.electron = electron_engine
+# Electron側ページ内右クリック「Ink Bossに追加」→ main.js の
+# stdoutマーカー行(INK_ELECTRON_ADD_SERVICE)→electron_bridgeの
+# バックグラウンドスレッド→Signal経由でQtメインスレッドへ。
+electron_engine.on_add_service_requested = lambda url: bridge.electron_add_service_signal.emit(url)
 
 # Aide幅（set_aide_widthで更新される）
 _aide_width = 0

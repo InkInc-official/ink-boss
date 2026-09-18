@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, QTimer
 from config import DIALOG_STYLE, save_config
 
 
-def show_add_service_dialog(config: dict, js_eval_fn, create_view_fn, group_id: str = "") -> None:
+def show_add_service_dialog(config: dict, js_eval_fn, create_view_fn, group_id: str = "", initial_url: str = "") -> None:
     groups = config.get("groups", [])
     gid_init = group_id or None
 
@@ -60,6 +60,8 @@ def show_add_service_dialog(config: dict, js_eval_fn, create_view_fn, group_id: 
         engine_combo.setCurrentIndex(0 if googleish else 1)
 
     url_input.textChanged.connect(_suggest)
+    if initial_url:
+        url_input.setText(initial_url)
 
     group_combo = None
     if groups:

@@ -16,6 +16,7 @@ from PySide6.QtWebEngineCore import (
     QWebEngineProfile, QWebEnginePage, QWebEngineSettings, QWebEngineNewWindowRequest,
     QWebEngineScript, QWebEngineUrlRequestInterceptor
 )
+from PySide6.QtWidgets import QMenu
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QRect, Qt, QUrl
 
 from config import SESSIONS_DIR, save_config
@@ -335,6 +336,28 @@ class _CustomPage(QWebEnginePage):
             self.setUrl(request.requestedUrl())
 
 
+class _CustomView(QWebEngineView):
+    """ページ内右クリックメニューに「Ink Bossに追加」を追加するための
+    QWebEngineViewサブクラス。標準のブラウザメニュー（戻る/進む/
+    再読み込み等）は page().createStandardContextMenu() でそのまま
+    維持しつつ、末尾に独自項目を追加する。既存の『サイドバーの+
+    ボタンから追加』と同じダイアログ（show_add_service_dialog）を、
+    現在表示中ページのURLを初期値にして開く。"""
+    def __init__(self, bridge_ref, parent=None):
+        super().__init__(parent)
+        self._bridge_ref = bridge_ref
+
+    def contextMenuEvent(self, event):
+        menu = self.createStandardContextMenu()
+        menu.addSeparator()
+        add_action = menu.addAction("Ink Bossに追加")
+        current_url = self.url().toString()
+        add_action.triggered.connect(
+            lambda checked=False, u=current_url: self._bridge_ref.open_add_service_with_url(u)
+        )
+        menu.popup(event.globalPos())
+
+
 class ViewBridge(QObject):
     # ─── シグナル定義 ───
     create_view_signal      = Signal(str, str)
@@ -355,6 +378,10 @@ class ViewBridge(QObject):
     init_views_signal       = Signal()   # サービス初期化用（on_shownから呼ぶ）
     # アプリ終了（JS スレッドからでも QueuedConnection で Qt メインスレッドへ）
     app_shutdown_signal     = Signal()
+    # Electron側ページ内右クリック「Ink Bossに追加」用。electron_bridgeの
+    # バックグラウンドスレッド（stdout読み取り）から呼ばれるため、
+    # ダイアログ表示をQtメインスレッドへ安全に渡すのに使う。
+    electron_add_service_signal = Signal(str)
 
     def __init__(self, qt_app, config: dict):
         super().__init__()
@@ -391,6 +418,7 @@ class ViewBridge(QObject):
         self.del_group_signal.connect(self._del_group, Q)
         self.init_views_signal.connect(self._init_views, Q)
         self.app_shutdown_signal.connect(self._on_app_shutdown, Q)
+        self.electron_add_service_signal.connect(self.open_add_service_with_url, Q)
 
     def set_shutdown_handler(self, fn) -> None:
         """終了処理コールバック（Qt メインスレッドで実行される）。"""
@@ -453,7 +481,7 @@ class ViewBridge(QObject):
         settings.setAttribute(QWebEngineSettings.WebAttribute.FocusOnNavigationEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
-        view = QWebEngineView(self.container)
+        view = _CustomView(self, self.container)
         view.setPage(page)
         view.setZoomFactor(_get_zoom_factor(self.config, sid))
         view.setUrl(QUrl("about:blank"))
@@ -747,6 +775,20 @@ class ViewBridge(QObject):
             js_eval_fn=js_eval,
             create_view_fn=self._create_view,
             group_id=group_id_str,
+        )
+
+    def open_add_service_with_url(self, url: str) -> None:
+        """ページ内右クリック「Ink Bossに追加」から呼ばれる。既存の
+        『サイドバーの+ボタンから追加』と同じダイアログを、URLだけ
+        現在のページのもので初期値にして開く（名前は未入力のまま）。
+        Qt側は _CustomView.contextMenuEvent からQtメインスレッド上で
+        直接呼ばれる。Electron側は electron_add_service_signal 経由
+        （バックグラウンドスレッド→QueuedConnectionでこのメソッドへ）。"""
+        show_add_service_dialog(
+            config=self.config,
+            js_eval_fn=js_eval,
+            create_view_fn=self._create_view,
+            initial_url=url,
         )
 
     @Slot()

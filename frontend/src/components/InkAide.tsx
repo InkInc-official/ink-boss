@@ -35,8 +35,11 @@ export default function InkAide({ open, onClose }: Props) {
         } else if (backend === "gemini") {
           setCurrentBackend("Gemini");
           if (llm.geminiApiKey) { setIsReady(true); }
+        } else if (backend === "deepseek") {
+          setCurrentBackend("DeepSeek");
+          if (llm.deepseekApiKey) { setIsReady(true); }
         } else {
-          const model = llm.ollamaModel || "llama3";
+          const model = llm.ollamaModel || "qwen2.5:3b";
           setCurrentBackend(model);
           try {
             const res = await fetch(`${llm.ollamaUrl || "http://localhost:11434"}/api/tags`, { signal: AbortSignal.timeout(2000) });
@@ -76,7 +79,7 @@ export default function InkAide({ open, onClose }: Props) {
         ? prompt.replace("__KNOWLEDGE__", knowledge ? `私は${knowledge}。\n\n` : "")
         : prompt;
       const fullPrompt = pageText
-        ? `ページ内容：\n${pageText.slice(0, 3000)}\n\n${resolvedPrompt}`
+        ? `ページ内容：\n${pageText.slice(0, 4500)}\n\n${resolvedPrompt}`
         : resolvedPrompt;
 
       let reply = "";
@@ -97,13 +100,21 @@ export default function InkAide({ open, onClose }: Props) {
         });
         const data = await res.json();
         reply = data.candidates?.[0]?.content?.parts?.[0]?.text || "応答できませんでした";
+      } else if (backend === "deepseek" && llm.deepseekApiKey) {
+        const res = await fetch("https://api.deepseek.com/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${llm.deepseekApiKey}` },
+          body: JSON.stringify({ model: "deepseek-chat", messages: [{ role: "user", content: fullPrompt }], max_tokens: 1000 })
+        });
+        const data = await res.json();
+        reply = data.choices?.[0]?.message?.content || "応答できませんでした";
       } else if (backend === "ollama") {
         const ollamaUrl = llm.ollamaUrl || "http://localhost:11434";
-        const model = llm.ollamaModel || "llama3";
+        const model = llm.ollamaModel || "qwen2.5:3b";
         const res = await fetch(`${ollamaUrl}/api/generate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model, prompt: fullPrompt, stream: false })
+          body: JSON.stringify({ model, prompt: fullPrompt, stream: false, options: { num_ctx: 8192 } })
         });
         const data = await res.json();
         reply = data.response || "応答できませんでした";

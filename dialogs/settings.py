@@ -239,15 +239,29 @@ def show_settings_dialog(config: dict, js_eval_fn) -> None:
 
     install_btn.clicked.connect(on_install_ollama)
 
-    # モデル管理
-    ai_l.addWidget(sec_lbl("モデル管理"))
-    RECOMMENDED = [
-        ("gemma2:9b",       "Gemma 2 9B",     "高品質（Google）"),
-        ("qwen2.5:3b",      "Qwen 2.5 3B",    "軽量・多言語対応"),
-        ("qwen2.5:7b",      "Qwen 2.5 7B",    "バランス型・多言語"),
-        ("llama3.2:latest", "Llama 3.2",      "Meta製汎用モデル"),
-        ("mistral:7b",      "Mistral 7B",     "高品質・フランス製"),
-    ]
+    # AIバックエンド選択
+    # 以前はOllamaモデルを5種類から選ぶUIだったが、qwen2.5:3b一本に
+    # 統一（軽量で動作が安定しているため）。あわせて、Claude/Gemini/
+    # DeepSeekを含む「バックエンド選択」自体をここで一元化する
+    # （以前はモデル選択ボタンでしかbackendを切り替えられず、
+    # Claude/GeminiのAPIキーを入力しても選択する手段が無かった）。
+    ai_l.addWidget(sec_lbl("AIバックエンド"))
+
+    OLLAMA_MODEL = "qwen2.5:3b"
+    SELECTED_STYLE = (
+        "QPushButton{border-radius:6px;padding:4px 10px;font-size:11px;"
+        "border:1px solid rgba(100,255,150,0.4);color:rgba(100,255,150,0.8);background:transparent;}"
+    )
+    UNSELECTED_STYLE = (
+        "QPushButton{border-radius:6px;padding:4px 10px;font-size:11px;"
+        "border:1px solid rgba(255,255,255,0.2);color:rgba(255,255,255,0.6);background:transparent;}"
+        "QPushButton:hover{border:1px solid rgba(255,255,255,0.4);color:white;}"
+    )
+    DOWNLOAD_STYLE = (
+        "QPushButton{border-radius:6px;padding:4px 10px;font-size:11px;"
+        "border:1px solid rgba(100,200,255,0.3);color:rgba(100,200,255,0.7);background:transparent;}"
+        "QPushButton:hover{border:1px solid rgba(100,200,255,0.6);color:rgba(100,200,255,1.0);}"
+    )
 
     try:
         with urllib.request.urlopen(
@@ -258,134 +272,113 @@ def show_settings_dialog(config: dict, js_eval_fn) -> None:
     except Exception:
         installed_models = []
 
-    current_model = config.get("llm", {}).get("ollamaModel", "")
-    model_buttons = {}
+    current_backend = config.get("llm", {}).get("backend", "ollama")
+    ollama_model_installed = any(OLLAMA_MODEL.split(":")[0] in m for m in installed_models)
+    backend_buttons: dict = {}
 
-    for model_id, model_name, model_desc in RECOMMENDED:
+    def make_backend_row(bid, name, desc):
         row_w = QFrame()
         row_w.setObjectName("card")
         row_l = QHBoxLayout(row_w)
         row_l.setContentsMargins(12, 8, 12, 8)
         col_l = QVBoxLayout()
         col_l.setSpacing(1)
-        nm = QLabel(model_name)
+        nm = QLabel(name)
         nm.setStyleSheet("color: rgba(255,255,255,0.75); font-size: 12px;")
-        ds = QLabel(model_desc)
+        ds = QLabel(desc)
         ds.setStyleSheet("color: rgba(255,255,255,0.3); font-size: 10px;")
         col_l.addWidget(nm)
         col_l.addWidget(ds)
         row_l.addLayout(col_l)
         row_l.addStretch()
-
-        is_installed = any(model_id.split(":")[0] in m for m in installed_models)
-        is_selected  = bool(current_model and current_model == model_id)
-        st_lbl = QLabel("✓" if is_installed else "")
-        st_lbl.setStyleSheet("color: rgba(100,255,150,0.6); font-size: 11px;")
-        row_l.addWidget(st_lbl)
-
-        if is_selected:
-            ab = QPushButton("使用中")
-            ab.setStyleSheet(
-                "QPushButton{border-radius:6px;padding:4px 10px;font-size:11px;"
-                "border:1px solid rgba(100,255,150,0.4);color:rgba(100,255,150,0.8);background:transparent;}"
-            )
-        elif is_installed:
-            ab = QPushButton("選択")
-            ab.setStyleSheet(
-                "QPushButton{border-radius:6px;padding:4px 10px;font-size:11px;"
-                "border:1px solid rgba(255,255,255,0.2);color:rgba(255,255,255,0.6);background:transparent;}"
-                "QPushButton:hover{border:1px solid rgba(255,255,255,0.4);color:white;}"
-            )
-        else:
-            ab = QPushButton("ダウンロード")
-            ab.setStyleSheet(
-                "QPushButton{border-radius:6px;padding:4px 10px;font-size:11px;"
-                "border:1px solid rgba(100,200,255,0.3);color:rgba(100,200,255,0.7);background:transparent;}"
-                "QPushButton:hover{border:1px solid rgba(100,200,255,0.6);color:rgba(100,200,255,1.0);}"
-            )
-        row_l.addWidget(ab)
-        model_buttons[model_id] = ab
+        btn = QPushButton("使用中" if current_backend == bid else "選択")
+        btn.setStyleSheet(SELECTED_STYLE if current_backend == bid else UNSELECTED_STYLE)
+        row_l.addWidget(btn)
+        backend_buttons[bid] = btn
         ai_l.addWidget(row_w)
+        return row_l, btn
 
-        def make_cb(mid=model_id, btn=ab, slb=st_lbl, inst=is_installed):
-            if inst:
-                def on_sel(checked=False, m=mid, b=btn):
-                    if "llm" not in config:
-                        config["llm"] = {}
-                    config["llm"]["ollamaModel"] = m
-                    config["llm"]["backend"] = "ollama"
-                    save_config(config)
-                    for k, v in model_buttons.items():
-                        if k == m:
-                            v.setText("使用中")
-                            v.setStyleSheet(
-                                "QPushButton{border-radius:6px;padding:4px 10px;font-size:11px;"
-                                "border:1px solid rgba(100,255,150,0.4);color:rgba(100,255,150,0.8);background:transparent;}"
-                            )
-                        elif v.text() == "使用中":
-                            v.setText("選択")
-                            v.setStyleSheet(
-                                "QPushButton{border-radius:6px;padding:4px 10px;font-size:11px;"
-                                "border:1px solid rgba(255,255,255,0.2);color:rgba(255,255,255,0.6);background:transparent;}"
-                                "QPushButton:hover{border:1px solid rgba(255,255,255,0.4);color:white;}"
-                            )
-                    progress_lbl.setText(f"✓ {m} を選択しました")
-                btn.clicked.connect(on_sel)
-            else:
-                def on_dl(m=mid, b=btn, s=slb):
-                    import threading
-                    from PySide6.QtCore import QMetaObject, Q_ARG
-                    b.setEnabled(False)
-                    b.setText("DL中...")
-                    def do_pull():
-                        try:
-                            proc = subprocess.Popen(
-                                ["ollama", "pull", m],
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            )
-                            for line in proc.stdout:
-                                QMetaObject.invokeMethod(progress_lbl, "setText",
-                                    Qt.ConnectionType.QueuedConnection,
-                                    Q_ARG(str, line.strip()[:80]))
-                            proc.wait()
-                            if proc.returncode == 0:
-                                QMetaObject.invokeMethod(s, "setText",
-                                    Qt.ConnectionType.QueuedConnection, Q_ARG(str, "✓"))
-                                QMetaObject.invokeMethod(b, "setText",
-                                    Qt.ConnectionType.QueuedConnection, Q_ARG(str, "選択"))
-                                b.setEnabled(True)
-                                b.setStyleSheet(
-                                    "QPushButton{border-radius:6px;padding:4px 10px;font-size:11px;"
-                                    "border:1px solid rgba(255,255,255,0.2);color:rgba(255,255,255,0.6);background:transparent;}"
-                                )
-                                if "llm" not in config:
-                                    config["llm"] = {}
-                                config["llm"]["ollamaModel"] = m
-                                config["llm"]["backend"] = "ollama"
-                                save_config(config)
-                            else:
-                                QMetaObject.invokeMethod(progress_lbl, "setText",
-                                    Qt.ConnectionType.QueuedConnection,
-                                    Q_ARG(str, "ダウンロード失敗"))
-                                b.setEnabled(True)
-                        except Exception as e:
-                            QMetaObject.invokeMethod(progress_lbl, "setText",
-                                Qt.ConnectionType.QueuedConnection, Q_ARG(str, f"エラー: {e}"))
-                            b.setEnabled(True)
-                    threading.Thread(target=do_pull, daemon=True).start()
-                btn.clicked.connect(on_dl)
-        make_cb()
+    def select_backend(bid):
+        if "llm" not in config:
+            config["llm"] = {}
+        config["llm"]["backend"] = bid
+        save_config(config)
+        for k, v in backend_buttons.items():
+            if k == bid:
+                v.setText("使用中")
+                v.setStyleSheet(SELECTED_STYLE)
+            elif v.text() == "使用中":
+                v.setText("選択")
+                v.setStyleSheet(UNSELECTED_STYLE)
+        progress_lbl.setText(f"✓ {bid} を選択しました")
 
-    # APIキー
-    ai_l.addWidget(sec_lbl("CLAUDE API キー"))
-    claude_in = text_input(config.get("llm", {}).get("claudeApiKey", ""), "sk-ant-...")
-    claude_in.setEchoMode(QLineEdit.EchoMode.Password)
-    ai_l.addWidget(claude_in)
+    # --- ローカルAI（Ollama・qwen2.5:3b固定） ---
+    ollama_row_l, ollama_btn = make_backend_row(
+        "ollama", "ローカルAI（Ollama・無料）", "PC内で動作・追加コストなし"
+    )
+    ollama_status_lbl = QLabel("✓" if ollama_model_installed else "")
+    ollama_status_lbl.setStyleSheet("color: rgba(100,255,150,0.6); font-size: 11px;")
+    ollama_row_l.insertWidget(1, ollama_status_lbl)
 
-    ai_l.addWidget(sec_lbl("GEMINI API キー"))
-    gemini_in = text_input(config.get("llm", {}).get("geminiApiKey", ""), "AIza...")
-    gemini_in.setEchoMode(QLineEdit.EchoMode.Password)
-    ai_l.addWidget(gemini_in)
+    if ollama_model_installed:
+        ollama_btn.clicked.connect(lambda: select_backend("ollama"))
+    else:
+        ollama_btn.setText("ダウンロード")
+        ollama_btn.setStyleSheet(DOWNLOAD_STYLE)
+
+        def on_dl_ollama():
+            import threading
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            ollama_btn.setEnabled(False)
+            ollama_btn.setText("DL中...")
+
+            def do_pull():
+                try:
+                    proc = subprocess.Popen(
+                        ["ollama", "pull", OLLAMA_MODEL],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                    )
+                    for line in proc.stdout:
+                        QMetaObject.invokeMethod(progress_lbl, "setText",
+                            Qt.ConnectionType.QueuedConnection,
+                            Q_ARG(str, line.strip()[:80]))
+                    proc.wait()
+                    if proc.returncode == 0:
+                        QMetaObject.invokeMethod(ollama_status_lbl, "setText",
+                            Qt.ConnectionType.QueuedConnection, Q_ARG(str, "✓"))
+                        ollama_btn.setEnabled(True)
+                        select_backend("ollama")
+                    else:
+                        QMetaObject.invokeMethod(progress_lbl, "setText",
+                            Qt.ConnectionType.QueuedConnection,
+                            Q_ARG(str, "ダウンロード失敗"))
+                        ollama_btn.setEnabled(True)
+                except Exception as e:
+                    QMetaObject.invokeMethod(progress_lbl, "setText",
+                        Qt.ConnectionType.QueuedConnection, Q_ARG(str, f"エラー: {e}"))
+                    ollama_btn.setEnabled(True)
+            threading.Thread(target=do_pull, daemon=True).start()
+
+        ollama_btn.clicked.connect(on_dl_ollama)
+    if "llm" not in config:
+        config["llm"] = {}
+    config["llm"]["ollamaModel"] = OLLAMA_MODEL
+
+    # --- API系バックエンド（Claude / Gemini / DeepSeek） ---
+    API_BACKENDS = [
+        ("claude",   "Claude API",   "高品質・要APIキー",   "claudeApiKey",   "sk-ant-..."),
+        ("gemini",   "Gemini API",   "無料枠あり",           "geminiApiKey",   "AIza..."),
+        ("deepseek", "DeepSeek API", "低コスト・高性能",     "deepseekApiKey", "sk-..."),
+    ]
+    key_inputs: dict = {}
+    for bid, name, desc, key_field, placeholder in API_BACKENDS:
+        _, btn = make_backend_row(bid, name, desc)
+        btn.clicked.connect(lambda checked=False, b=bid: select_backend(b))
+        ai_l.addWidget(sec_lbl(f"{name} キー"))
+        key_in = text_input(config.get("llm", {}).get(key_field, ""), placeholder)
+        key_in.setEchoMode(QLineEdit.EchoMode.Password)
+        ai_l.addWidget(key_in)
+        key_inputs[key_field] = key_in
 
     ai_save = QPushButton("APIキーを保存")
     ai_save.setObjectName("addBtn")
@@ -395,10 +388,7 @@ def show_settings_dialog(config: dict, js_eval_fn) -> None:
     def on_ai_save():
         if "llm" not in config:
             config["llm"] = {}
-        config["llm"].update({
-            "claudeApiKey": claude_in.text().strip(),
-            "geminiApiKey": gemini_in.text().strip(),
-        })
+        config["llm"].update({field: inp.text().strip() for field, inp in key_inputs.items()})
         save_config(config)
         save_msg.setText("✓ 保存しました")
         QTimer.singleShot(2000, lambda: save_msg.setText(""))

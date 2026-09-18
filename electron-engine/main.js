@@ -8,7 +8,7 @@
  * - stdout: INK_ELECTRON_READY port=<n>
  */
 
-const { app, BrowserWindow, session, shell } = require("electron");
+const { app, BrowserWindow, session, shell, Menu, clipboard } = require("electron");
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
@@ -122,6 +122,49 @@ function createServiceWindow(sid, url, opts = {}) {
     } catch (_) {}
     shell.openExternal(openUrl).catch(() => {});
     return { action: "deny" };
+  });
+
+  // ページ内右クリックメニュー。ElectronはQtWebEngineと違いデフォルトの
+  // ネイティブコンテキストメニューを持たないため、標準的なブラウザ項目
+  // （戻る/進む/再読み込み、選択時のコピー、入力欄でのカット/コピー/
+  // 貼り付け等）を自前で組み立てたうえで、末尾に「Ink Bossに追加」を
+  // 追加する。クリック時は既存のstdoutマーカー行の仕組み
+  // （INK_ELECTRON_READY と同様のパターン）でPython側へURLを伝える。
+  win.webContents.on("context-menu", (_event, params) => {
+    const nav = win.webContents.navigationHistory;
+    const template = [];
+    if (params.isEditable) {
+      template.push(
+        { label: "切り取り", role: "cut", enabled: params.editFlags.canCut },
+        { label: "コピー", role: "copy", enabled: params.editFlags.canCopy },
+        { label: "貼り付け", role: "paste", enabled: params.editFlags.canPaste },
+        { label: "すべて選択", role: "selectAll" },
+        { type: "separator" },
+      );
+    } else if (params.selectionText) {
+      template.push({ label: "コピー", role: "copy" }, { type: "separator" });
+    }
+    template.push(
+      { label: "戻る", enabled: nav.canGoBack(), click: () => nav.goBack() },
+      { label: "進む", enabled: nav.canGoForward(), click: () => nav.goForward() },
+      { label: "再読み込み", click: () => win.webContents.reload() },
+    );
+    if (params.linkURL) {
+      template.push(
+        { type: "separator" },
+        { label: "リンクのURLをコピー", click: () => clipboard.writeText(params.linkURL) },
+      );
+    }
+    template.push(
+      { type: "separator" },
+      {
+        label: "Ink Bossに追加",
+        click: () => {
+          process.stdout.write(`INK_ELECTRON_ADD_SERVICE ${params.pageURL}\n`);
+        },
+      },
+    );
+    Menu.buildFromTemplate(template).popup({ window: win });
   });
 
   win.on("close", (e) => {
@@ -329,7 +372,14 @@ async function handleRequest(req, res) {
       });
     }
     if (req.method === "GET" && route === "/hibernated") {
-      return sendJson(res, 200, { ok: true, ids: [...hibernated] });
+      // ids: 明示的に休止扱い（生成済みだが未ロード）のsid一覧。
+      // awake: 実際にウィンドウが生成され、ロード済み（休止ではない）のsid一覧。
+      // 起動時に一度もcreate/showされていないサービス（Python側の
+      // _init_viewsはElectronサービスを起動時に作らない設計）は、
+      // どちらにも含まれない ＝ Python側では「休止扱い」として
+      // 解釈する（get_hibernated_idsのコメント参照）。
+      const awake = [...windows.keys()].filter((sid) => !hibernated.has(sid));
+      return sendJson(res, 200, { ok: true, ids: [...hibernated], awake });
     }
     if (req.method === "POST" && route === "/create") {
       const { sid, url: svcUrl, muted, loadNow } = body;
