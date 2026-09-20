@@ -97,7 +97,8 @@ def show_settings_dialog(config: dict, js_eval_fn):
     def make_hib_btn(val, label_text, is_active):
         btn = QPushButton(label_text)
         btn.setStyleSheet(active_s if is_active else inactive_s)
-        def on_click(v=val):
+        # clicked は checked(bool) を第1引数で渡すため、受け流さないと v が False で上書きされる
+        def on_click(_checked=False, v=val):
             config["hibernate_minutes"] = v
             save_config(config)
             for b, bv in hib_btns:
