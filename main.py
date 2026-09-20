@@ -324,6 +324,7 @@ def main():
         electron=electron_engine,
         get_screen_rect_fn=get_screen_rect,
     )
+    api.start_auto_hibernate()
     # 終了は bridge シグナル経由で Qt メインスレッド実行
     bridge.set_shutdown_handler(api._shutdown_for_exit)
     _orig_set = api.set_aide_width

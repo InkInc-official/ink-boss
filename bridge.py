@@ -391,6 +391,8 @@ class ViewBridge(QObject):
         self.profiles:        dict = {}
         self.urls:            dict = {}
         self.hibernated:      set  = set()
+        # 現在音声を出力中のQtサービス（自動休止の除外判定用。recentlyAudibleChangedで更新）
+        self.audible:         set  = set()
         self.active_id:       str | None = None
         self.container               = None
         self._active_menu            = None
@@ -481,6 +483,9 @@ class ViewBridge(QObject):
         settings.setAttribute(QWebEngineSettings.WebAttribute.FocusOnNavigationEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
+        page.recentlyAudibleChanged.connect(
+            lambda audible, s=sid: self.audible.add(s) if audible else self.audible.discard(s)
+        )
         view = _CustomView(self, self.container)
         view.setPage(page)
         view.setZoomFactor(_get_zoom_factor(self.config, sid))

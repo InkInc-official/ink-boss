@@ -343,10 +343,14 @@ class ElectronEngine:
         """実際にウィンドウが生成・ロード済み（休止ではない）のsid一覧。
         起動時に一度もcreate/showされていないサービスはここに含まれない
         （= 呼び出し側で「休止扱い」として解釈すべき）。"""
+        return self.get_awake_state()[0]
+
+    def get_awake_state(self) -> tuple[list[str], list[str]]:
+        """(起動済みsid一覧, うち現在音声を出力中のsid一覧) を1回の問い合わせで返す。"""
         r = self._get("/hibernated")
         if r.get("ok"):
-            return list(r.get("awake") or [])
-        return []
+            return list(r.get("awake") or []), list(r.get("audible") or [])
+        return [], []
 
     def health(self) -> dict[str, Any]:
         return self._get("/health")

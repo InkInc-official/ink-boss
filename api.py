@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 
 import webview
@@ -36,6 +37,14 @@ class InkBossAPI:
         self._aide_width_val = 0
         self._dragging = False
         self._active_engine: str | None = None
+        # 自動休止用: sid -> 最後にアクティブだった時刻(epoch秒)
+        self._last_active: dict[str, float] = {}
+        self._audible_logged: set[str] = set()
+        # 「今ユーザーが見ているサービス」。bridge.active_id は Electron へ切替える際に
+        # キュー経由で実行される _hide_all() が None に上書きしてしまう（実機で確認）ため、
+        # 自動休止の除外判定には使えない。show_service で記録する専用の値を使う。
+        self._active_sid: str | None = None
+        self._active_set_at: float = 0.0
 
     # ── helpers ───────────────────────────────────────────
     def _find_service(self, sid: str) -> dict | None:
@@ -81,6 +90,92 @@ class InkBossAPI:
                 self._bridge.remove_view_signal.emit(sid)
         except Exception as e:
             print(f"[api] destroy view {sid}/{eng}: {e}", flush=True)
+
+    # ── 自動休止（hibernate_minutes） ──────────────────────
+    AUTO_HIBERNATE_TICK_S = 10
+
+    def start_auto_hibernate(self) -> None:
+        threading.Thread(target=self._auto_hibernate_loop, daemon=True).start()
+
+    def _auto_hibernate_minutes(self) -> int:
+        """0以下・未設定・bool(過去の不具合で保存されたFalse)は「無効」扱い。"""
+        v = self._config.get("hibernate_minutes", 0)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+            return 0
+        return int(v)
+
+    def _awake_state(self) -> tuple[set[str], set[str]]:
+        """(起動済み（休止していない）sid, うち現在音声を出力中のsid)。Qt/Electron両方。"""
+        known = {s["id"] for s in self._config.get("services", [])}
+        awake = {
+            sid for sid in list(self._bridge.views)
+            if sid not in self._bridge.hibernated
+        }
+        audible = set(self._bridge.audible)
+        if self._electron and self._electron.is_available():
+            try:
+                e_awake, e_audible = self._electron.get_awake_state()
+                awake.update(e_awake)
+                audible.update(e_audible)
+            except Exception as e:
+                print(f"[auto-hibernate] electron awake query failed: {e}", flush=True)
+        return awake & known, audible & awake
+
+    def _auto_hibernate_tick(self, now: float | None = None) -> None:
+        minutes = self._auto_hibernate_minutes()
+        if minutes <= 0:
+            # 無効: 何もしない。古い記録が残ると再有効化直後に即休止されるため破棄だけ行う
+            self._last_active.clear()
+            return
+        now = time.time() if now is None else now
+        limit = minutes * 60
+        awake, audible = self._awake_state()
+        # 休止/削除された場合は解除（復帰後に永久に除外され続けるのを防ぐ）。
+        # ただし表示直後は起動(wake)が完了しておらずawakeに未反映のことがあるため猶予を置く
+        if self._active_sid and self._active_sid not in awake and now - self._active_set_at > 5:
+            self._active_sid = None
+        active = self._active_sid or self._bridge.active_id
+        if active:
+            self._last_active[active] = now
+        # 音声/動画を再生中のサービスは非アクティブでも休止しない。
+        # 記録時刻を更新し続けるので、再生停止時点から設定時間の計測が始まる
+        for sid in audible:
+            self._last_active[sid] = now
+        if audible != self._audible_logged:
+            print(f"[auto-hibernate] audible services (skipped): {sorted(audible)}", flush=True)
+            self._audible_logged = set(audible)
+        for sid in list(self._last_active):
+            if sid not in awake:
+                del self._last_active[sid]
+        for sid in awake:
+            if sid == active:
+                continue  # 今見ているサービスは休止しない
+            last = self._last_active.setdefault(sid, now)
+            if now - last >= limit:
+                svc = self._find_service(sid)
+                print(
+                    f"[auto-hibernate] {sid} ({(svc or {}).get('name')}) "
+                    f"inactive {int(now - last)}s >= {limit}s → hibernate",
+                    flush=True,
+                )
+                self._last_active.pop(sid, None)
+                try:
+                    self.hibernate_service(sid)
+                    js_eval(
+                        f"window.dispatchEvent(new CustomEvent('service-hibernated',"
+                        f"{{detail:{json.dumps(sid)}}}))"
+                    )
+                except Exception as e:
+                    print(f"[auto-hibernate] hibernate {sid} failed: {e}", flush=True)
+
+    def _auto_hibernate_loop(self) -> None:
+        print(f"[auto-hibernate] timer started (tick={self.AUTO_HIBERNATE_TICK_S}s)", flush=True)
+        while True:
+            time.sleep(self.AUTO_HIBERNATE_TICK_S)
+            try:
+                self._auto_hibernate_tick()
+            except Exception as e:
+                print(f"[auto-hibernate] tick error: {e}", flush=True)
 
     def sync_active_overlay(self) -> None:
         """B1: drag/resize 中に Electron をコンテンツ領域へ追従させる。"""
@@ -219,6 +314,13 @@ class InkBossAPI:
         w = webview.windows[0] if webview.windows else None
         if not w:
             return
+        _now = time.time()
+        _prev = self._active_sid or self._bridge.active_id
+        if _prev and _prev != sid:
+            self._last_active[_prev] = _now
+        self._last_active[sid] = _now
+        self._active_sid = sid
+        self._active_set_at = _now
         aide_w = self._aide_width_val
         eng = self._service_engine(sid)
         svc = self._find_service(sid)

@@ -379,7 +379,12 @@ async function handleRequest(req, res) {
       // どちらにも含まれない ＝ Python側では「休止扱い」として
       // 解釈する（get_hibernated_idsのコメント参照）。
       const awake = [...windows.keys()].filter((sid) => !hibernated.has(sid));
-      return sendJson(res, 200, { ok: true, ids: [...hibernated], awake });
+      // audible: 現在音声を出力中のsid（自動休止の除外判定に使う）
+      const audible = awake.filter((sid) => {
+        const w = windows.get(sid);
+        return w && !w.isDestroyed() && w.webContents.isCurrentlyAudible();
+      });
+      return sendJson(res, 200, { ok: true, ids: [...hibernated], awake, audible });
     }
     if (req.method === "POST" && route === "/create") {
       const { sid, url: svcUrl, muted, loadNow } = body;
