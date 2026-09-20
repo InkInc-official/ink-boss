@@ -53,7 +53,11 @@ def show_service_context_menu(
     remove_view_fn=None,
     navigate_view_fn=None,
     active_menu_holder: list | None = None,
+    dialog_wrapper=None,
 ) -> None:
+    # Electron(alwaysOnTop)の裏にダイアログが隠れないよう、ダイアログを開く
+    # 操作だけを dialog_wrapper（ViewBridge側でElectronを一時非表示にする）経由にする
+    wrap = dialog_wrapper or (lambda fn: fn())
     if active_menu_holder and active_menu_holder[0]:
         try:
             active_menu_holder[0].close()
@@ -107,17 +111,17 @@ def show_service_context_menu(
         return
 
     if action == rename_a:
-        _do_rename(sid, name, config, js_eval_fn)
+        wrap(lambda: _do_rename(sid, name, config, js_eval_fn))
     elif action == icon_a:
-        _do_change_icon(sid, config, js_eval_fn)
+        wrap(lambda: _do_change_icon(sid, config, js_eval_fn))
     elif action == url_a:
-        _do_change_url(sid, (svc or {}).get("url", ""), config, js_eval_fn, navigate_view_fn)
+        wrap(lambda: _do_change_url(sid, (svc or {}).get("url", ""), config, js_eval_fn, navigate_view_fn))
     elif action == switch_a:
-        _do_toggle_engine(sid, name, config, js_eval_fn)
+        wrap(lambda: _do_toggle_engine(sid, name, config, js_eval_fn))
     elif action == delete_a:
         # 重要: hibernate ではなく remove
         rm = remove_view_fn or hibernate_view_fn
-        _do_delete(sid, name, config, js_eval_fn, rm)
+        wrap(lambda: _do_delete(sid, name, config, js_eval_fn, rm))
     elif action == toggle_a:
         if is_hib:
             wake_view_fn(sid)
@@ -429,7 +433,9 @@ def show_group_context_menu(
     gid: str, name: str, x: int, y: int,
     config: dict, js_eval_fn,
     active_menu_holder: list,
+    dialog_wrapper=None,
 ) -> None:
+    wrap = dialog_wrapper or (lambda fn: fn())
     if active_menu_holder[0]:
         try:
             active_menu_holder[0].close()
@@ -447,9 +453,9 @@ def show_group_context_menu(
     if not action:
         return
     if action == rename_a:
-        _rename_group(gid, name, config, js_eval_fn)
+        wrap(lambda: _rename_group(gid, name, config, js_eval_fn))
     elif action == delete_a:
-        _delete_group(gid, name, config, js_eval_fn)
+        wrap(lambda: _delete_group(gid, name, config, js_eval_fn))
 
 
 def _rename_group(gid: str, current_name: str, config: dict, js_eval_fn) -> None:

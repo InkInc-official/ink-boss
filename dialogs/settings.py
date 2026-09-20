@@ -23,7 +23,7 @@ from updater import CURRENT_VERSION
 _open_dialogs: list = []
 
 
-def show_settings_dialog(config: dict, js_eval_fn) -> None:
+def show_settings_dialog(config: dict, js_eval_fn):
     """
     設定ダイアログを表示する。
 
@@ -484,3 +484,4 @@ def show_settings_dialog(config: dict, js_eval_fn) -> None:
     dialog.show()
     dialog.raise_()
     dialog.activateWindow()
+    return dialog

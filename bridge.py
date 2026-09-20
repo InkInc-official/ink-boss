@@ -766,26 +766,43 @@ class ViewBridge(QObject):
             remove_view_fn=_destroy_any,
             navigate_view_fn=_navigate_any,
             active_menu_holder=self._active_menu_holder,
+            dialog_wrapper=self._show_dialog_with_electron_hidden,
         )
 
-    def _show_dialog_with_electron_hidden(self, dialog_fn) -> None:
+    def _hide_electron_for_dialog(self):
         """ダイアログ表示中、ElectronウィンドウがalwaysOnTopのせいで
         ネイティブダイアログの上に被って操作不能になる問題への対策。
-        Electronが現在表示中であれば一旦hide_all()してからダイアログを
-        開き、閉じた後（追加完了/キャンセルいずれでも）元のサービスを
-        再表示する。座標はダミー値（main.pyのapplicationStateChanged
-        復帰時と同じパターン）で、既存のウィンドウ位置はそのまま
-        維持される（新規ナビゲーションも発生しない）。"""
+        Electronが現在表示中なら一旦hide_all()し、「元のサービスを再表示
+        する関数」を返す（表示中でなければ何もしない関数を返す）。
+        再表示はダミー座標（main.pyのapplicationStateChanged復帰時と同じ
+        パターン）で行うため、位置は維持され再ナビゲートも発生しない。
+        ダイアログ中に削除/エンジン切替/別サービスへの切替があった場合は、
+        /show が未存在sidを新規作成したり別サービスに重なったりするため
+        復元しない。"""
         electron = getattr(self, "electron", None)
         was_shown = bool(electron and electron.is_shown)
         prev_sid = electron.active_sid if was_shown else None
         if was_shown:
             electron.hide_all()
+
+        def restore() -> None:
+            if not (was_shown and prev_sid):
+                return
+            svc = next((s for s in self.config.get("services", []) if s["id"] == prev_sid), None)
+            still_electron = svc is not None and (svc.get("engine") or "qt").lower() in ("electron", "e")
+            still_current = self.active_id in (prev_sid, None)
+            if still_electron and still_current and not electron.is_shown:
+                electron.show(prev_sid, "", 0, 0, 0, 0)
+
+        return restore
+
+    def _show_dialog_with_electron_hidden(self, dialog_fn) -> None:
+        """モーダル（exec()でブロックする）ダイアログ用。閉じたら復元する。"""
+        restore = self._hide_electron_for_dialog()
         try:
             dialog_fn()
         finally:
-            if was_shown and prev_sid:
-                electron.show(prev_sid, "", 0, 0, 0, 0)
+            restore()
 
     @Slot(str)
     def _show_add_dialog(self, group_id_str: str):
@@ -812,11 +829,19 @@ class ViewBridge(QObject):
 
     @Slot()
     def _show_settings(self):
-        show_settings_dialog(config=self.config, js_eval_fn=js_eval)
+        # 設定ダイアログは非モーダル（.show()で即return）なので、
+        # ブロッキング用ヘルパーではなくfinishedシグナルで復元する
+        restore = self._hide_electron_for_dialog()
+        dialog = show_settings_dialog(config=self.config, js_eval_fn=js_eval)
+        if dialog is None:
+            restore()
+        else:
+            dialog.finished.connect(lambda _=None: restore())
 
     @Slot()
     def _show_add_group_dialog(self):
-        show_add_group_dialog(config=self.config, js_eval_fn=js_eval)
+        self._show_dialog_with_electron_hidden(
+            lambda: show_add_group_dialog(config=self.config, js_eval_fn=js_eval))
 
     @Slot(str, str, int, int)
     def _show_group_menu(self, gid, name, x, y):
@@ -824,6 +849,7 @@ class ViewBridge(QObject):
             gid=gid, name=name, x=x, y=y,
             config=self.config, js_eval_fn=js_eval,
             active_menu_holder=self._active_menu_holder,
+            dialog_wrapper=self._show_dialog_with_electron_hidden,
         )
 
     @Slot(str)
