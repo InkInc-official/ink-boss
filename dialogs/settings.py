@@ -14,13 +14,75 @@ from PySide6.QtWidgets import (
     QGridLayout, QFrame, QScrollArea, QTextEdit, QFileDialog,
     QInputDialog, QMessageBox, QApplication,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QObject, Signal
 from config import DIALOG_STYLE, save_config
 from updater import CURRENT_VERSION
 
 # 非モーダル(.show())のダイアログはPython側の参照が切れるとGCされて
 # 消えてしまうため、開いている間はここで保持する。
 _open_dialogs: list = []
+
+# ローカルAI(Ollama)の標準モデル。軽量で動作が安定しているためこれ一本を既定にする
+DEFAULT_OLLAMA_MODEL = "qwen2.5:3b"
+
+
+class _PullSignals(QObject):
+    """ollama pull のワーカースレッド → UIスレッドへの通知用"""
+    progress = Signal(str)
+    finished = Signal(bool, str)   # (成功?, モデル名 or エラー文)
+
+
+def pull_ollama_model(model: str, on_progress=None, on_done=None) -> None:
+    """`ollama pull <model>` をバックグラウンドスレッドで実行する。
+    on_progress(line) / on_done(ok, model_or_error) はワーカースレッドから
+    呼ばれるため、UI更新はSignal経由（_PullSignals）で行うこと。"""
+    import threading
+
+    def _worker():
+        try:
+            proc = subprocess.Popen(
+                ["ollama", "pull", model],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
+            last = ""
+            for line in proc.stdout:
+                last = line.strip()
+                if on_progress and last:
+                    on_progress(last[:80])
+            proc.wait()
+            if on_done:
+                on_done(proc.returncode == 0, model if proc.returncode == 0 else (last or "ダウンロード失敗"))
+        except Exception as e:  # ollama未インストール等
+            if on_done:
+                on_done(False, str(e))
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _confirm_dialog(parent, text: str, yes_label: str, no_label: str) -> bool:
+    """他のダイアログと見た目を揃えた確認ダイアログ（QMessageBoxは
+    スタイルの都合で正しく描画されないため使わない）。"""
+    d = QDialog()   # 親を付けない（他のダイアログと同じ。モーダルはexec()で担保）
+    d.setWindowTitle("確認")
+    d.setMinimumWidth(360)
+    d.setStyleSheet(DIALOG_STYLE)
+    d.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+    lay = QVBoxLayout(d)
+    lay.setSpacing(12)
+    lay.setContentsMargins(24, 24, 24, 24)
+    lbl = QLabel(text)
+    lbl.setWordWrap(True)
+    lay.addWidget(lbl)
+    row = QHBoxLayout()
+    no_btn = QPushButton(no_label)
+    yes_btn = QPushButton(yes_label)
+    yes_btn.setObjectName("addBtn")
+    row.addWidget(no_btn)
+    row.addWidget(yes_btn)
+    lay.addLayout(row)
+    no_btn.clicked.connect(d.reject)
+    yes_btn.clicked.connect(d.accept)
+    return d.exec() == QDialog.DialogCode.Accepted
 
 
 def show_settings_dialog(config: dict, js_eval_fn):
@@ -240,15 +302,6 @@ def show_settings_dialog(config: dict, js_eval_fn):
 
     install_btn.clicked.connect(on_install_ollama)
 
-    # AIバックエンド選択
-    # 以前はOllamaモデルを5種類から選ぶUIだったが、qwen2.5:3b一本に
-    # 統一（軽量で動作が安定しているため）。あわせて、Claude/Gemini/
-    # DeepSeekを含む「バックエンド選択」自体をここで一元化する
-    # （以前はモデル選択ボタンでしかbackendを切り替えられず、
-    # Claude/GeminiのAPIキーを入力しても選択する手段が無かった）。
-    ai_l.addWidget(sec_lbl("AIバックエンド"))
-
-    OLLAMA_MODEL = "qwen2.5:3b"
     SELECTED_STYLE = (
         "QPushButton{border-radius:6px;padding:4px 10px;font-size:11px;"
         "border:1px solid rgba(100,255,150,0.4);color:rgba(100,255,150,0.8);background:transparent;}"
@@ -263,18 +316,219 @@ def show_settings_dialog(config: dict, js_eval_fn):
         "border:1px solid rgba(100,200,255,0.3);color:rgba(100,200,255,0.7);background:transparent;}"
         "QPushButton:hover{border:1px solid rgba(100,200,255,0.6);color:rgba(100,200,255,1.0);}"
     )
+    if "llm" not in config:
+        config["llm"] = {}
+    ollama_url = config["llm"].get("ollamaUrl", "http://localhost:11434")
 
-    try:
-        with urllib.request.urlopen(
-            f"{config.get('llm', {}).get('ollamaUrl', 'http://localhost:11434')}/api/tags",
-            timeout=3,
-        ) as r:
-            installed_models = [m["name"] for m in json.loads(r.read()).get("models", [])]
-    except Exception:
-        installed_models = []
+    def fetch_installed_models():
+        """`ollama list` 相当（/api/tags）。Ollamaに接続できない場合は None。"""
+        try:
+            with urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=3) as r:
+                return [m["name"] for m in json.loads(r.read()).get("models", [])]
+        except Exception:
+            return None
 
-    current_backend = config.get("llm", {}).get("backend", "ollama")
-    ollama_model_installed = any(OLLAMA_MODEL.split(":")[0] in m for m in installed_models)
+    def model_installed(name, installed):
+        if not installed:
+            return False
+        return name in installed or (":" not in name and f"{name}:latest" in installed)
+
+    def current_model():
+        return config["llm"].get("ollamaModel") or DEFAULT_OLLAMA_MODEL
+
+    model_state = {"installed": fetch_installed_models()}
+    pull_signals = _PullSignals(dialog)
+
+    # --- AIモデル（ローカルAI） ---
+    # 標準は qwen2.5:3b 一本。上級者向けに別モデルへ「その場で標準として
+    # 上書き」できる（標準と別モデルを並行して記憶する仕組みは持たない）。
+    ai_l.addWidget(sec_lbl("AIモデル（ローカルAI）"))
+    model_card = QFrame()
+    model_card.setObjectName("card")
+    model_row = QHBoxLayout(model_card)
+    model_row.setContentsMargins(12, 8, 12, 8)
+    model_col = QVBoxLayout()
+    model_col.setSpacing(1)
+    model_nm = QLabel("Qwen2.5 3B（標準）")
+    model_nm.setStyleSheet("color: rgba(255,255,255,0.75); font-size: 12px;")
+    model_ds = QLabel(f"軽量・日本語対応・無料（{DEFAULT_OLLAMA_MODEL}）")
+    model_ds.setStyleSheet("color: rgba(255,255,255,0.3); font-size: 10px;")
+    model_col.addWidget(model_nm)
+    model_col.addWidget(model_ds)
+    model_row.addLayout(model_col)
+    model_row.addStretch()
+    default_btn = QPushButton("")
+    model_row.addWidget(default_btn)
+    ai_l.addWidget(model_card)
+
+    model_msg = QLabel("")
+    model_msg.setStyleSheet("color: rgba(255,255,255,0.4); font-size: 10px;")
+    model_msg.setWordWrap(True)
+    ai_l.addWidget(model_msg)
+
+    default_mode = {"v": "download"}
+
+    def refresh_default_row():
+        have = model_installed(DEFAULT_OLLAMA_MODEL, model_state["installed"])
+        default_btn.setEnabled(True)
+        if not have:
+            default_mode["v"] = "download"
+            default_btn.setText("ダウンロード")
+            default_btn.setStyleSheet(DOWNLOAD_STYLE)
+        elif current_model() == DEFAULT_OLLAMA_MODEL:
+            default_mode["v"] = "none"
+            default_btn.setText("使用中")
+            default_btn.setStyleSheet(SELECTED_STYLE)
+        else:
+            default_mode["v"] = "select"
+            default_btn.setText("選択")
+            default_btn.setStyleSheet(UNSELECTED_STYLE)
+
+    def set_model(name):
+        config["llm"]["ollamaModel"] = name
+        save_config(config)
+        refresh_default_row()
+        refresh_scan_list()
+        model_msg.setText(f"✓ モデルを {name} に設定しました")
+
+    def on_pull_progress(line):
+        model_msg.setText(line)
+
+    def on_pull_finished(ok, info):
+        model_state["installed"] = fetch_installed_models()
+        if ok:
+            model_msg.setText(f"✓ {info} のダウンロードが完了しました")
+            if info == DEFAULT_OLLAMA_MODEL:
+                set_model(DEFAULT_OLLAMA_MODEL)
+                model_msg.setText(f"✓ {info} のダウンロードが完了しました")
+            else:
+                refresh_scan_list()
+        else:
+            model_msg.setText(f"ダウンロード失敗: {info}")
+        refresh_default_row()
+
+    pull_signals.progress.connect(on_pull_progress)
+    pull_signals.finished.connect(on_pull_finished)
+
+    def on_default_btn():
+        if default_mode["v"] == "download":
+            default_btn.setEnabled(False)
+            default_btn.setText("DL中...")
+            model_msg.setText("ダウンロードを開始します...")
+            pull_ollama_model(DEFAULT_OLLAMA_MODEL, pull_signals.progress.emit, pull_signals.finished.emit)
+        elif default_mode["v"] == "select":
+            set_model(DEFAULT_OLLAMA_MODEL)
+
+    default_btn.clicked.connect(lambda checked=False: on_default_btn())
+    refresh_default_row()
+
+    # --- 折りたたみ: 他のモデルを使う（上級者向け） ---
+    adv_toggle = QPushButton("▶ 他のモデルを使う（上級者向け）")
+    adv_toggle.setStyleSheet(
+        "QPushButton{border:none;text-align:left;padding:4px 0;font-size:11px;color:rgba(255,255,255,0.45);background:transparent;}"
+        "QPushButton:hover{color:white;}"
+    )
+    ai_l.addWidget(adv_toggle)
+    adv_box = QWidget()
+    adv_l = QVBoxLayout(adv_box)
+    adv_l.setContentsMargins(0, 0, 0, 0)
+    adv_l.setSpacing(6)
+    adv_box.setVisible(False)   # デフォルトは閉じておく
+    ai_l.addWidget(adv_box)
+
+    def on_adv_toggle():
+        vis = not adv_box.isVisible()
+        adv_box.setVisible(vis)
+        adv_toggle.setText(("▼" if vis else "▶") + " 他のモデルを使う（上級者向け）")
+
+    adv_toggle.clicked.connect(lambda checked=False: on_adv_toggle())
+
+    scan_btn = QPushButton("PC内のモデルをスキャン")
+    adv_l.addWidget(scan_btn)
+    scan_list_w = QWidget()
+    scan_list_l = QVBoxLayout(scan_list_w)
+    scan_list_l.setContentsMargins(0, 0, 0, 0)
+    scan_list_l.setSpacing(4)
+    adv_l.addWidget(scan_list_w)
+    scanned = {"done": False}
+
+    def refresh_scan_list():
+        if not scanned["done"]:
+            return
+        while scan_list_l.count():
+            it = scan_list_l.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        installed = model_state["installed"]
+        if installed is None:
+            msg = QLabel("Ollamaに接続できません（起動しているか確認してください）")
+            msg.setStyleSheet("color: rgba(255,100,100,0.7); font-size: 11px;")
+            scan_list_l.addWidget(msg)
+            return
+        if not installed:
+            msg = QLabel("インストール済みのモデルはありません")
+            msg.setStyleSheet("color: rgba(255,255,255,0.4); font-size: 11px;")
+            scan_list_l.addWidget(msg)
+            return
+        for name in installed:
+            row = QFrame()
+            row.setObjectName("card")
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(10, 4, 10, 4)
+            nl = QLabel(name)
+            nl.setStyleSheet("color: rgba(255,255,255,0.7); font-size: 11px;")
+            rl.addWidget(nl)
+            rl.addStretch()
+            in_use = name == current_model()
+            b = QPushButton("使用中" if in_use else "選択")
+            b.setStyleSheet(SELECTED_STYLE if in_use else UNSELECTED_STYLE)
+            if not in_use:
+                b.clicked.connect(lambda checked=False, n=name: set_model(n))
+            rl.addWidget(b)
+            scan_list_l.addWidget(row)
+
+    def on_scan():
+        model_state["installed"] = fetch_installed_models()
+        scanned["done"] = True
+        refresh_scan_list()
+        refresh_default_row()
+
+    scan_btn.clicked.connect(lambda checked=False: on_scan())
+
+    custom_lbl = QLabel("モデル名を直接入力（未取得のモデルも指定できます）")
+    custom_lbl.setStyleSheet("color: rgba(255,255,255,0.35); font-size: 10px;")
+    adv_l.addWidget(custom_lbl)
+    custom_row = QHBoxLayout()
+    custom_in = text_input("", "例: llama3.2:3b")
+    custom_row.addWidget(custom_in)
+    custom_btn = QPushButton("設定")
+    custom_row.addWidget(custom_btn)
+    adv_l.addLayout(custom_row)
+
+    def on_custom_set():
+        name = custom_in.text().strip()
+        if not name:
+            return
+        installed = fetch_installed_models()
+        model_state["installed"] = installed
+        set_model(name)
+        if installed is not None and not model_installed(name, installed):
+            if _confirm_dialog(
+                dialog,
+                f"{name} はまだダウンロードされていません。\n今ダウンロードしますか？",
+                "ダウンロードする", "設定だけ行う",
+            ):
+                model_msg.setText(f"{name} のダウンロードを開始します...")
+                pull_ollama_model(name, pull_signals.progress.emit, pull_signals.finished.emit)
+            else:
+                model_msg.setText(f"✓ {name} に設定しました（未取得です。後で ollama pull {name} を実行してください）")
+        custom_in.clear()
+
+    custom_btn.clicked.connect(lambda checked=False: on_custom_set())
+
+    # AIバックエンド選択（Claude / Gemini / DeepSeek / ローカルAI の切替）
+    ai_l.addWidget(sec_lbl("AIバックエンド"))
+    current_backend = config["llm"].get("backend", "ollama")
     backend_buttons: dict = {}
 
     def make_backend_row(bid, name, desc):
@@ -300,8 +554,6 @@ def show_settings_dialog(config: dict, js_eval_fn):
         return row_l, btn
 
     def select_backend(bid):
-        if "llm" not in config:
-            config["llm"] = {}
         config["llm"]["backend"] = bid
         save_config(config)
         for k, v in backend_buttons.items():
@@ -313,57 +565,10 @@ def show_settings_dialog(config: dict, js_eval_fn):
                 v.setStyleSheet(UNSELECTED_STYLE)
         progress_lbl.setText(f"✓ {bid} を選択しました")
 
-    # --- ローカルAI（Ollama・qwen2.5:3b固定） ---
-    ollama_row_l, ollama_btn = make_backend_row(
+    _, ollama_btn = make_backend_row(
         "ollama", "ローカルAI（Ollama・無料）", "PC内で動作・追加コストなし"
     )
-    ollama_status_lbl = QLabel("✓" if ollama_model_installed else "")
-    ollama_status_lbl.setStyleSheet("color: rgba(100,255,150,0.6); font-size: 11px;")
-    ollama_row_l.insertWidget(1, ollama_status_lbl)
-
-    if ollama_model_installed:
-        ollama_btn.clicked.connect(lambda: select_backend("ollama"))
-    else:
-        ollama_btn.setText("ダウンロード")
-        ollama_btn.setStyleSheet(DOWNLOAD_STYLE)
-
-        def on_dl_ollama():
-            import threading
-            from PySide6.QtCore import QMetaObject, Q_ARG
-            ollama_btn.setEnabled(False)
-            ollama_btn.setText("DL中...")
-
-            def do_pull():
-                try:
-                    proc = subprocess.Popen(
-                        ["ollama", "pull", OLLAMA_MODEL],
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                    )
-                    for line in proc.stdout:
-                        QMetaObject.invokeMethod(progress_lbl, "setText",
-                            Qt.ConnectionType.QueuedConnection,
-                            Q_ARG(str, line.strip()[:80]))
-                    proc.wait()
-                    if proc.returncode == 0:
-                        QMetaObject.invokeMethod(ollama_status_lbl, "setText",
-                            Qt.ConnectionType.QueuedConnection, Q_ARG(str, "✓"))
-                        ollama_btn.setEnabled(True)
-                        select_backend("ollama")
-                    else:
-                        QMetaObject.invokeMethod(progress_lbl, "setText",
-                            Qt.ConnectionType.QueuedConnection,
-                            Q_ARG(str, "ダウンロード失敗"))
-                        ollama_btn.setEnabled(True)
-                except Exception as e:
-                    QMetaObject.invokeMethod(progress_lbl, "setText",
-                        Qt.ConnectionType.QueuedConnection, Q_ARG(str, f"エラー: {e}"))
-                    ollama_btn.setEnabled(True)
-            threading.Thread(target=do_pull, daemon=True).start()
-
-        ollama_btn.clicked.connect(on_dl_ollama)
-    if "llm" not in config:
-        config["llm"] = {}
-    config["llm"]["ollamaModel"] = OLLAMA_MODEL
+    ollama_btn.clicked.connect(lambda checked=False: select_backend("ollama"))
 
     # --- API系バックエンド（Claude / Gemini / DeepSeek） ---
     API_BACKENDS = [
@@ -376,7 +581,7 @@ def show_settings_dialog(config: dict, js_eval_fn):
         _, btn = make_backend_row(bid, name, desc)
         btn.clicked.connect(lambda checked=False, b=bid: select_backend(b))
         ai_l.addWidget(sec_lbl(f"{name} キー"))
-        key_in = text_input(config.get("llm", {}).get(key_field, ""), placeholder)
+        key_in = text_input(config["llm"].get(key_field, ""), placeholder)
         key_in.setEchoMode(QLineEdit.EchoMode.Password)
         ai_l.addWidget(key_in)
         key_inputs[key_field] = key_in
