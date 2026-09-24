@@ -15,7 +15,28 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-ENGINE_DIR = Path(__file__).resolve().parent / "electron-engine"
+def _resolve_base_dir() -> Path:
+    """electron-engine/ を探す基準ディレクトリ。
+
+    - 開発時（python3 main.py で直接実行）: このファイル自身の場所。
+    - PyInstallerでパッケージ化された実行ファイルから起動時
+      （--onedir。sys.frozen が真になる）: 実行ファイル自身の
+      ディレクトリ。electron-engine/ はPyInstallerのdatasには含めず
+      （270MB超あり、展開・アーカイブのコストが無駄に大きいため）、
+      パッケージ側で実行ファイルと同じ階層に直接コピーする設計
+      なので、sys._MEIPASS ではなく sys.executable を基準にする。
+
+    OS固有のパス（/usr/lib/ink-boss 等）はここに一切書かない。
+    実行ファイルの場所からの相対解決のみに留めることで、将来
+    Windows版をPyInstallerでビルドする際も同じロジックがそのまま
+    使える（Windows対応の実装自体は別途必要だが、このパス解決は
+    そのままで良いはず）。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+ENGINE_DIR = _resolve_base_dir() / "electron-engine"
 READY_PREFIX = "INK_ELECTRON_READY port="
 ADD_SERVICE_PREFIX = "INK_ELECTRON_ADD_SERVICE "
 START_TIMEOUT_S = 25.0

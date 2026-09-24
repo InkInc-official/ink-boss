@@ -12,4 +12,3 @@ src-tauri/
 src-tauri/
 .env
 build/
-ink-boss.spec
