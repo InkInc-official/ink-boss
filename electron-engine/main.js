@@ -31,6 +31,11 @@ if (!app.requestSingleInstanceLock()) {
 const windows = new Map();
 /** @type {Set<string>} */
 const hibernated = new Set();
+// renderer-process-gone後、まだ再読み込みできていないsid。
+// isCrashed()相当のAPIはこのElectronバージョンには無いため、
+// render-process-goneイベントで自前追跡する（詳細はcreateServiceWindow参照）。
+/** @type {Set<string>} */
+const crashed = new Set();
 /** @type {Map<string, string>} */
 const urls = new Map();
 /** @type {string | null} */
@@ -130,6 +135,32 @@ function createServiceWindow(sid, url, opts = {}) {
   // 貼り付け等）を自前で組み立てたうえで、末尾に「Ink Bossに追加」を
   // 追加する。クリック時は既存のstdoutマーカー行の仕組み
   // （INK_ELECTRON_READY と同様のパターン）でPython側へURLを伝える。
+  // renderer-process-gone（クラッシュ・GPUプロセス絡みの異常終了等）への対応。
+  // 以前はこのイベントを一切監視しておらず、クラッシュしたウィンドウは
+  // BrowserWindow自体は生きたまま（windows Mapにも残ったまま）中身の
+  // rendererだけが失われ、以後どの操作（クリック/ダブルクリック/右クリック
+  // 「復帰」）を試しても画面が真っ暗のまま戻らない不具合があった
+  // （showService/wakeServiceのどちらもwin.isDestroyed()しか見ておらず、
+  // 「windowはあるがrendererは死んでいる」状態を検知できなかったため。
+  // 実機でrendererを意図的にクラッシュさせて再現・確認済み）。
+  // 表示中なら即座に自前でloadURLして自己修復し、非表示中でも
+  // crashedフラグを立てておき、次にshow/wakeされた際に必ず
+  // 再読み込みしてから表示するようにする。
+  win.webContents.on("render-process-gone", (_event, details) => {
+    console.error(
+      `[electron-engine] render-process-gone sid=${sid} reason=${details.reason} exitCode=${details.exitCode}`
+    );
+    crashed.add(sid);
+    if (activeId === sid && win.isVisible()) {
+      const target = urls.get(sid) || "about:blank";
+      console.error(`[electron-engine] sid=${sid} was visible — auto-recovering (loadURL ${target})`);
+      crashed.delete(sid);
+      try {
+        win.loadURL(target);
+      } catch (_) {}
+    }
+  });
+
   win.webContents.on("context-menu", (_event, params) => {
     const nav = win.webContents.navigationHistory;
     const template = [];
@@ -231,7 +262,7 @@ function showService(sid, bounds) {
   // isFocused() チェックでは検知できない）。
   // 対象sidが既にactiveかつ可視状態なら、show()/focus() 自体を
   // 呼ばずに座標更新だけ行う。
-  const alreadyActive = activeId === sid && win.isVisible() && !hibernated.has(sid);
+  const alreadyActive = activeId === sid && win.isVisible() && !hibernated.has(sid) && !crashed.has(sid);
 
   if (!alreadyActive) {
     hideAllExcept(sid);
@@ -244,7 +275,16 @@ function showService(sid, bounds) {
       win.loadURL(url);
       hibernated.delete(sid);
     }
+  } else if (crashed.has(sid)) {
+    // renderer-process-gone後、非表示中だったために自動復帰できず
+    // 持ち越されたクラッシュ。表示前に必ず読み直す。
+    const url = urls.get(sid) || "about:blank";
+    console.error(`[electron-engine] sid=${sid} recovering from previous crash before show (loadURL ${url})`);
+    try {
+      win.loadURL(url);
+    } catch (_) {}
   }
+  crashed.delete(sid);
 
   if (!alreadyActive) {
     win.show();
@@ -276,6 +316,7 @@ function hibernateService(sid) {
     win.loadURL("about:blank");
   } catch (_) {}
   hibernated.add(sid);
+  crashed.delete(sid);  // about:blankへのloadURLで既にrendererは回復済み
   win.hide();
   if (activeId === sid) activeId = null;
   return { ok: true };
@@ -290,6 +331,7 @@ function wakeService(sid, url) {
     win.loadURL(target);
   } catch (_) {}
   hibernated.delete(sid);
+  crashed.delete(sid);
   return { ok: true };
 }
 
@@ -303,6 +345,7 @@ function removeService(sid) {
   windows.delete(sid);
   urls.delete(sid);
   hibernated.delete(sid);
+  crashed.delete(sid);
   if (activeId === sid) activeId = null;
   return { ok: true };
 }
@@ -368,6 +411,7 @@ async function handleRequest(req, res) {
         activeId,
         windows: [...windows.keys()],
         hibernated: [...hibernated],
+        crashed: [...crashed],
         userData: USER_DATA,
       });
     }

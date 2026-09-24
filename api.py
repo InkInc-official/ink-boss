@@ -178,7 +178,14 @@ class InkBossAPI:
                 print(f"[auto-hibernate] tick error: {e}", flush=True)
 
     def sync_active_overlay(self) -> None:
-        """B1: drag/resize 中に Electron をコンテンツ領域へ追従させる。"""
+        """B1: drag/resize 中に Electron をコンテンツ領域へ追従させる。
+
+        【申し送り（未対応・様子見中）】ここで使う bridge.active_id は、Electron へ
+        切り替える際にキュー経由で実行される bridge._hide_all() が None に上書きする
+        ことがある（自動休止の実装中に実機で確認）。そのため Electron 表示中に
+        ウィンドウを動かしても追従しない可能性がある。現時点で症状の報告は無いため
+        未修正。「Electron表示中にウィンドウを動かすと追従がおかしい」等の症状が出たら、
+        自動休止と同様に show_service で記録している self._active_sid を使うことを検討。"""
         sid = self._bridge.active_id
         if not sid or self._service_engine(sid) != "electron":
             return

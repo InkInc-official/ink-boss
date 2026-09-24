@@ -65,6 +65,117 @@ def resolve_electron_binary() -> str | None:
     return None
 
 
+def _read_cmdline(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
+
+
+def _read_ppid(pid: int) -> int | None:
+    try:
+        with open(f"/proc/{pid}/stat", "r") as f:
+            stat = f.read()
+        after = stat.rsplit(")", 1)[-1].split()
+        return int(after[1])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _descendant_pids(root_pid: int) -> set[int]:
+    """root_pid自身とその子孫プロセスのPID集合（main.py の同名関数と同じ考え方）。"""
+    children_map: dict[int, list[int]] = {}
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            ppid = _read_ppid(int(entry))
+            if ppid is not None:
+                children_map.setdefault(ppid, []).append(int(entry))
+    except OSError:
+        return {root_pid}
+    result = {root_pid}
+    stack = [root_pid]
+    while stack:
+        p = stack.pop()
+        for c in children_map.get(p, []):
+            if c not in result:
+                result.add(c)
+                stack.append(c)
+    return result
+
+
+def cleanup_orphaned_electron_processes() -> None:
+    """前回の異常終了（Qt側クラッシュ・SIGKILL・ハードウォッチドッグの
+    os._exit等）でElectronヘルパーの終了処理が走らなかった場合、
+    electron-engineのメインプロセス（と、その配下のrenderer/gpu-process
+    等）が孤児プロセスとして残り続けることがある。renderer が長時間
+    残存するとGPUメモリを消費し続け、後続のセッションで描画不良
+    （画面が真っ黒になる等）の一因になりうる。
+
+    新しいElectronヘルパーを起動する前に、このengine-engine/main.js を
+    起動コマンドに持つプロセスを探し、その親プロセスが既に存在しない
+    （＝init/systemdに再親化された孤児）ものだけを対象に、プロセス
+    ツリーごと終了させる。まだ生きている親を持つプロセス（＝今まさに
+    動いている別のInk Bossインスタンス）は誤って巻き込まないよう、
+    対象から除外する。"""
+    marker = str(ENGINE_DIR / "main.js")
+    try:
+        pids = [int(e) for e in os.listdir("/proc") if e.isdigit()]
+    except OSError:
+        return
+
+    orphan_roots: list[int] = []
+    for pid in pids:
+        cmdline = _read_cmdline(pid)
+        if marker not in cmdline or "--type=" in cmdline:
+            continue  # 子プロセス（renderer/gpu-process等）はメインプロセス経由でまとめて処理する
+        ppid = _read_ppid(pid)
+        # ppid==1（init/systemdへの再親化）は「元の親がもう存在しない」ことの
+        # 確実な印。ここをうっかり「親が生きている」扱いにすると、実際には
+        # 孤児化したプロセスを一生見逃してしまう（実機で確認済みのバグ）。
+        parent_alive = ppid is not None and ppid not in (0, 1) and os.path.exists(f"/proc/{ppid}")
+        if parent_alive:
+            continue  # 生きている親を持つ＝別の現行インスタンス。触らない
+        orphan_roots.append(pid)
+
+    if not orphan_roots:
+        return
+
+    targets: set[int] = set()
+    for root in orphan_roots:
+        targets |= _descendant_pids(root)
+
+    print(f"[ElectronEngine] cleanup: found orphaned electron-engine process tree {sorted(targets)}", flush=True)
+    import signal
+    import time as _time
+
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except Exception as e:
+            print(f"[ElectronEngine] cleanup: SIGTERM {pid} failed: {e}", flush=True)
+
+    deadline = _time.time() + 3.0
+    while _time.time() < deadline:
+        if not any(os.path.exists(f"/proc/{pid}") for pid in targets):
+            break
+        _time.sleep(0.2)
+
+    for pid in targets:
+        if os.path.exists(f"/proc/{pid}"):
+            try:
+                os.kill(pid, signal.SIGKILL)
+                print(f"[ElectronEngine] cleanup: SIGKILL {pid} (did not exit on SIGTERM)", flush=True)
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                print(f"[ElectronEngine] cleanup: SIGKILL {pid} failed: {e}", flush=True)
+
+
 class ElectronEngine:
     def __init__(self) -> None:
         self._proc: subprocess.Popen | None = None
@@ -103,6 +214,10 @@ class ElectronEngine:
         with self._lock:
             if self.is_available():
                 return True
+            try:
+                cleanup_orphaned_electron_processes()
+            except Exception as e:
+                print(f"[ElectronEngine] cleanup skipped (error): {e}", flush=True)
             binary = resolve_electron_binary()
             if not binary:
                 print(
@@ -186,7 +301,7 @@ class ElectronEngine:
                 if len(self._stderr_tail) > 40:
                     self._stderr_tail = self._stderr_tail[-40:]
                 low = line.lower()
-                if any(k in low for k in ("error", "fail", "ready", "listening", "created", "shutdown", "quit")):
+                if any(k in low for k in ("error", "fail", "ready", "listening", "created", "shutdown", "quit", "crash", "recover")):
                     print(f"[electron-engine:err] {line}", flush=True)
         except Exception:
             pass
