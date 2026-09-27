@@ -401,6 +401,7 @@ def dump_ime_debug_info(sid: str, active_element: str = "") -> None:
     IME_DEBUG_LOG に追記する。main.jsでF12が押されたとき、
     electron_bridge.ElectronEngine.on_ime_debug_requested 経由で呼ばれる。"""
     import datetime
+    import os
     import subprocess as sp
 
     lines = [f"===== {datetime.datetime.now().isoformat()} sid={sid} ====="]
@@ -408,13 +409,23 @@ def dump_ime_debug_info(sid: str, active_element: str = "") -> None:
     lines.append(f"document.activeElement: {active_element or '(取得できず)'}")
 
     try:
+        # PyInstaller(--onedir)でパッケージされた実行ファイルはブートローダーが
+        # LD_LIBRARY_PATHに同梱の_internalディレクトリ（古いバージョンの
+        # libdbus-1.so.3等を含む）を追加してから起動する。この環境をそのまま
+        # 子プロセスに継承させると、システムのdbus-sendが誤って同梱ライブラリを
+        # ロードしようとして次のようなバージョン不一致エラーで失敗する:
+        #   dbus-send: .../libdbus-1.so.3: version `LIBDBUS_PRIVATE_1.16.2' not found
+        # （創作PCの実機検証で発見。Ink Boss本体の動作には影響しないため、
+        # この診断用サブプロセス呼び出しに限定してLD_LIBRARY_PATHを取り除く。）
+        debug_env = os.environ.copy()
+        debug_env.pop("LD_LIBRARY_PATH", None)
         result = sp.run(
             [
                 "dbus-send", "--session", "--print-reply",
                 "--dest=org.fcitx.Fcitx5", "/controller",
                 "org.fcitx.Fcitx.Controller1.DebugInfo",
             ],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=debug_env,
         )
         out = result.stdout or result.stderr
         ic_lines = [ln.strip() for ln in out.splitlines() if "IC [" in ln]
