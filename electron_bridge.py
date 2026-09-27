@@ -128,6 +128,88 @@ def _descendant_pids(root_pid: int) -> set[int]:
     return result
 
 
+# 【デバッグ専用・調査完了後に削除】IME(fcitx5)不具合の切り分け用。
+# GTK_IM_MODULE_DEBUGのような専用デバッグ環境変数はGTK3に存在せず、
+# GTK_DEBUG=modulesもUbuntu/Debianの配布ビルドでは無効化されているため
+# （ime.py の log_gtk_diagnostics 側のコメント参照）、実際に稼働中の
+# Electronプロセスを /proc 経由で直接調べることで代替する。
+_IME_DEBUG_ENV_KEYS = (
+    "GTK_IM_MODULE", "GTK_IM_MODULE_FILE", "GTK_PATH", "GTK_EXE_PREFIX",
+    "XMODIFIERS", "XDG_DATA_DIRS",
+)
+
+
+def _proc_maps_has(pid: int, needle: str) -> bool | None:
+    """/proc/<pid>/maps に needle を含む行があるか。読めなければ None
+    （プロセスが既に終了した等、権限以外の理由も含めて区別しない）。"""
+    try:
+        with open(f"/proc/{pid}/maps", "r") as f:
+            return needle in f.read()
+    except OSError:
+        return None
+
+
+def _proc_environ_subset(pid: int, keys: tuple[str, ...]) -> dict[str, str]:
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for part in raw.split(b"\0"):
+        if b"=" not in part:
+            continue
+        k, _, v = part.partition(b"=")
+        ks = k.decode("utf-8", "replace")
+        if ks in keys:
+            out[ks] = v.decode("utf-8", "replace")
+    return out
+
+
+def _proc_type(cmdline: str) -> str:
+    for part in cmdline.split():
+        if part.startswith("--type="):
+            return part[len("--type=") :]
+    return "main"
+
+
+# lsof/ss で「ibus」という文字列を含むソケットパスを探す案を実際に試したが、
+# 事務所PCの既知動作ケース（fcitx5側でfocus:1まで確認できている状態）でも
+# 一致する行が一切見つからず、この方法は偽陰性になることが判明した。
+# 理由: fcitx5のIC一覧に出る`frontend:dbus`は、~/.config/ibus/bus/...の
+# ソケットファイル経由ではなく、セッションD-Busバス(多くの場合
+# /run/user/<uid>/bus への抽象[abstract]Unixソケット)経由でfcitx5
+# (org.fcitx.Fcitx5)と通信しており、lsof/ssではその接続の相手先パスが
+# 匿名としてしか見えず「ibus」という文字列では引っかからない。
+# そのため、「Electronがfcitx5と実際に通信できているか」は、ソケットの
+# 有無を推測するのではなく、dump_ime_debug_info()が直接取得する
+# fcitx5自身のDebugInfo（IC一覧・focus値）を一次情報として判断する。
+# ここでは代わりに、(1) fcitx5用GTKモジュール(im-fcitx5.so)が実際に
+# メモリへロードされているか、(2) GTK/IME関連の実際の環境変数、の
+# 2点をプロセスごとに集める（どちらもソケット推測と違い確実に判定できる）。
+def _gather_process_diagnostics(root_pid: int) -> str:
+    """Electronのメインプロセス(root_pid)とその子孫（renderer/gpu-process等）
+    それぞれについて、fcitx5用GTK3 IMモジュール(im-fcitx5.so)が実際にメモリへ
+    ロードされているか、GTK/IME関連の実際の環境変数をまとめて返す。
+    F12デバッグが押された瞬間に呼ばれ、ime.pyのdump_ime_debug_info経由で
+    fcitx5自身のDebugInfo（IC一覧・focus値、一次情報）と一緒にログへ書き出される。"""
+    lines: list[str] = []
+    pids = sorted(_descendant_pids(root_pid))
+    lines.append(f"Electronプロセスツリー(pid): {pids}")
+    for pid in pids:
+        cmdline = _read_cmdline(pid)
+        kind = _proc_type(cmdline)
+        has_module = _proc_maps_has(pid, "im-fcitx5.so")
+        has_module_str = (
+            "ロード済み" if has_module is True else "未ロード" if has_module is False else "(確認不可)"
+        )
+        lines.append(f"  pid={pid} type={kind} im-fcitx5.so={has_module_str}")
+        env_subset = _proc_environ_subset(pid, _IME_DEBUG_ENV_KEYS)
+        if env_subset:
+            lines.append(f"    env: {env_subset}")
+    return "\n".join(lines)
+
+
 def cleanup_orphaned_electron_processes() -> None:
     """前回の異常終了（Qt側クラッシュ・SIGKILL・ハードウォッチドッグの
     os._exit等）でElectronヘルパーの終了処理が走らなかった場合、
@@ -219,7 +301,8 @@ class ElectronEngine:
         # 【デバッグ専用・調査完了後に削除】IME(fcitx5)不具合の切り分け用。
         # Electron側でF12が押されたとき(そのウィンドウが実際にフォーカスされて
         # いる時のみ発火)に呼ばれる。main.jsからのstdoutマーカー行経由。
-        self.on_ime_debug_requested: Callable[[str, str], None] | None = None
+        # 第3引数は_gather_process_diagnostics()が返すプロセスツリー診断文字列。
+        self.on_ime_debug_requested: Callable[[str, str, str], None] | None = None
 
     @property
     def port(self) -> int | None:
@@ -263,6 +346,18 @@ class ElectronEngine:
             try:
                 from ime import log_ime_env
                 log_ime_env("Electron子プロセスへ渡す環境変数", env)
+            except Exception:
+                pass
+            # 【デバッグ専用・調査完了後に削除】.debパッケージを複数環境
+            # （事務所PC・創作PC等）へ配布した際のGTK/fcitx5構成差を比較する
+            # ための静的診断。起動のたびに一度、ime-debug.logへ追記する。
+            # binary（node_modules/.bin/electron）はcli.jsへのシンボリック
+            # リンクでldd対象にならないため、実際のELF本体
+            # （node_modules/electron/dist/electron）を別途解決して渡す。
+            try:
+                from ime import log_gtk_diagnostics
+                real_elf = ENGINE_DIR / "node_modules" / "electron" / "dist" / "electron"
+                log_gtk_diagnostics(str(real_elf) if real_elf.exists() else binary)
             except Exception:
                 pass
             cmd = [binary, str(ENGINE_DIR / "main.js")]
@@ -322,8 +417,14 @@ class ElectronEngine:
                     rest = line[len(IME_DEBUG_PREFIX) :].strip()
                     sid, _, active_element = rest.partition(" ")
                     if sid and self.on_ime_debug_requested:
+                        proc_diag = ""
                         try:
-                            self.on_ime_debug_requested(sid, active_element)
+                            if self._proc is not None:
+                                proc_diag = _gather_process_diagnostics(self._proc.pid)
+                        except Exception as e:
+                            proc_diag = f"(プロセス診断取得失敗: {e})"
+                        try:
+                            self.on_ime_debug_requested(sid, active_element, proc_diag)
                         except Exception:
                             pass
                 elif line:

@@ -395,10 +395,11 @@ def setup_ime() -> str:
 IME_DEBUG_LOG = Path.home() / ".config" / "ink-boss" / "ime-debug.log"
 
 
-def dump_ime_debug_info(sid: str, active_element: str = "") -> None:
+def dump_ime_debug_info(sid: str, active_element: str = "", proc_diag: str = "") -> None:
     """fcitx5のDebugInfo（dbus-send相当）と、その時点のIME関連環境変数、
-    Webページ側の実際のフォーカス要素（document.activeElement）を
-    IME_DEBUG_LOG に追記する。main.jsでF12が押されたとき、
+    Webページ側の実際のフォーカス要素（document.activeElement）、
+    Electronプロセスツリーの診断情報（proc_diag、electron_bridge.py側で
+    収集）を IME_DEBUG_LOG に追記する。main.jsでF12が押されたとき、
     electron_bridge.ElectronEngine.on_ime_debug_requested 経由で呼ばれる。"""
     import datetime
     import os
@@ -407,6 +408,9 @@ def dump_ime_debug_info(sid: str, active_element: str = "") -> None:
     lines = [f"===== {datetime.datetime.now().isoformat()} sid={sid} ====="]
     lines.append(describe_ime_env())
     lines.append(f"document.activeElement: {active_element or '(取得できず)'}")
+    if proc_diag:
+        lines.append("--- Electronプロセス診断（electron_bridge.py収集） ---")
+        lines.append(proc_diag)
 
     try:
         # PyInstaller(--onedir)でパッケージされた実行ファイルはブートローダーが
@@ -444,3 +448,109 @@ def dump_ime_debug_info(sid: str, active_element: str = "") -> None:
         print(f"[IME-DEBUG] ログを書き出しました: {IME_DEBUG_LOG}", flush=True)
     except Exception as e:
         print(f"[IME-DEBUG] ログ書き出し失敗: {e}", flush=True)
+
+
+# 【デバッグ専用・調査完了後に削除】fcitx5のGTK3用IMモジュール(im-fcitx5.so)が
+# 実際にレジストリ（immodules.cache）に登録されているか、パッケージ構成が
+# 実行環境間でどう違うかを比較するための静的診断。
+#
+# 当初 GTK_IM_MODULE_DEBUG という環境変数でロード状況を出力させる案が
+# あったが、system libgtk-3.so.0 の文字列を実際に調べたところ、そのような
+# 環境変数はGTK3に存在しない。さらに GTK_DEBUG=modules（実在する公式の
+# デバッグ変数）も、Ubuntu/Debianの配布ビルドは G_ENABLE_DEBUG 無効で
+# ビルドされているため出力が抑制され効果がない（"GTK_DEBUG set but
+# ignored because gtk isn't built with G_ENABLE_DEBUG"という文字列が
+# libgtk-3.so.0 自体に埋め込まれているのを実機で確認済み）。
+# そのため、GTKのデバッグ出力に頼らず、(a) パッケージのインストール状態
+# ・バージョン、(b) モジュールファイル自体の有無、(c) 実際に稼働中の
+# Electronプロセスのメモリマップに im-fcitx5.so がロードされているか
+# （dump_ime_debug_info と併用、_gather_process_diagnostics 側で確認）
+# という、ビルド設定に依存しない方法で代替する。
+def log_gtk_diagnostics(electron_binary: str) -> None:
+    """Electron起動のたびに一度、GTK/fcitx5関連の静的な環境情報を
+    IME_DEBUG_LOG に追記する（F12を押さなくても起動時に自動で記録される）。
+    .debパッケージを複数の環境（事務所PC・創作PC等）へ配布した際に、
+    パッケージ構成やGTKのバージョン差を比較する目的。"""
+    import datetime
+
+    lines = [f"===== {datetime.datetime.now().isoformat()} Electron起動時のGTK/fcitx5診断 ====="]
+
+    try:
+        result = subprocess.run(
+            ["ldd", electron_binary], capture_output=True, text=True, timeout=5,
+        )
+        out = result.stdout or result.stderr
+        gtk_lines = [ln.strip() for ln in out.splitlines() if "gtk" in ln.lower()]
+        lines.append(
+            "ldd(gtk関連のみ抜粋): " + ("; ".join(gtk_lines) if gtk_lines else "(gtk関連のリンクが見つからない)")
+        )
+    except Exception as e:
+        lines.append(f"ldd実行失敗: {e}")
+
+    fcitx5_module = Path("/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules/im-fcitx5.so")
+    lines.append(
+        f"fcitx5用GTK3 IMモジュールファイル({fcitx5_module}): "
+        + ("存在する" if fcitx5_module.exists() else "存在しない（要注意：これが無いとGTK_IM_MODULE=fcitxを指定してもロードしようがない）")
+    )
+
+    cache_candidates = [
+        Path("/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache"),
+        Path("/etc/gtk-3.0/gtk.immodules"),
+    ]
+    for cache in cache_candidates:
+        if cache.exists():
+            try:
+                content = cache.read_text(encoding="utf-8", errors="replace")
+                has_fcitx = "fcitx" in content
+                lines.append(f"immodulesキャッシュ({cache}): 存在する / fcitxの登録={'あり' if has_fcitx else 'なし'}")
+            except Exception as e:
+                lines.append(f"immodulesキャッシュ({cache})読み込み失敗: {e}")
+        else:
+            lines.append(f"immodulesキャッシュ({cache}): 存在しない")
+
+    # パッケージ名を固定文字列で決め打ちしない（Ubuntu 24.04以降の64bit
+    # time_t移行で libgtk-3-0 → libgtk-3-0t64 のようにパッケージ名自体が
+    # 変わっており、環境によって実在するパッケージ名が異なるため）。
+    # 実際に使われるファイルの所有パッケージを dpkg -S で逆引きすることで、
+    # 事務所PC・創作PC間のパッケージ名/バージョン差をそのまま比較できる。
+    def _dpkg_owner_info(file_path: str) -> str:
+        try:
+            r = subprocess.run(["dpkg", "-S", file_path], capture_output=True, text=True, timeout=5)
+            if r.returncode != 0 or not r.stdout.strip():
+                return f"(所有パッケージ不明: {file_path})"
+            pkg = r.stdout.split(":")[0].strip()
+        except Exception as e:
+            return f"(dpkg -S失敗: {e})"
+        try:
+            # マルチアーキ環境（amd64+i386が両方インストール済み等）では同名
+            # パッケージが複数マッチし、-f のフォーマット文字列に改行を
+            # 入れないと区切り無しで連結されてしまう（実機で確認済み）ため、
+            # 明示的に改行を入れて分割し、最初の1件のみを使う。
+            vr = subprocess.run(
+                ["dpkg-query", "-W", "-f=${Version}\n", pkg], capture_output=True, text=True, timeout=5,
+            )
+            versions = [v for v in vr.stdout.splitlines() if v.strip()]
+            ver = versions[0] if versions else "(バージョン取得失敗)"
+        except Exception as e:
+            ver = f"(dpkg-query実行失敗: {e})"
+        return f"{pkg} {ver}  (ファイル: {file_path})"
+
+    for target in (
+        "/usr/lib/x86_64-linux-gnu/libgtk-3.so.0",
+        "/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules/im-fcitx5.so",
+    ):
+        lines.append(f"所有パッケージ: {_dpkg_owner_info(target)}")
+
+    fcitx5_bin = shutil.which("fcitx5")
+    if fcitx5_bin:
+        lines.append(f"所有パッケージ: {_dpkg_owner_info(fcitx5_bin)}")
+    else:
+        lines.append("fcitx5実行ファイル: which fcitx5で見つからず（未インストールの可能性）")
+
+    try:
+        IME_DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(IME_DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n\n")
+        print(f"[IME-DEBUG] GTK診断をログに書き出しました: {IME_DEBUG_LOG}", flush=True)
+    except Exception as e:
+        print(f"[IME-DEBUG] GTK診断ログ書き出し失敗: {e}", flush=True)
