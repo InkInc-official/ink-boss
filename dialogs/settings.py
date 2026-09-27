@@ -6,8 +6,13 @@ ViewBridgeから呼ばれる設定画面（一般・AI/LLM・データ・About �
 """
 
 import json
+import os
+import shutil
+import signal
 import subprocess
+import threading
 import urllib.request
+from pathlib import Path
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QTabWidget, QWidget,
@@ -26,6 +31,117 @@ _open_dialogs: list = []
 DEFAULT_OLLAMA_MODEL = "qwen2.5:3b"
 
 
+# ─────────────────────────────────────────────────────────
+# Ollama の検出・インストール
+#
+# 【申し送り（将来のWindows対応向け）】
+# ここのOllamaインストール処理（curl -fsSL .../install.sh | sh、sudo権限を
+# 要する）は Linux 専用の実装。Windowsには sudo という概念自体が無く、
+# Ollama公式のインストール手順もWindowsでは全く別物（.exeインストーラー等）に
+# なる。将来Windows対応に着手する際は、find_ollama() の探索パス
+# （/usr/local/bin 等）、run_ollama_install() 全体、プロセスグループ終了
+# （os.killpg / start_new_session はPOSIX専用）をOS判定で分岐させるか、
+# Windows版では別の実装に置き換える必要がある。
+# ─────────────────────────────────────────────────────────
+OLLAMA_INSTALL_CMD = "curl -fsSL https://ollama.com/install.sh | sh"
+OLLAMA_INSTALL_TIMEOUT_S = 900
+OLLAMA_ADMIN_HINT = (
+    "Ollamaのインストールには管理者権限が必要です。難しく感じる場合は、"
+    "代わりにClaude/Gemini/DeepSeekのAPIキーを設定する方法もあります"
+    "（AI/LLMタブ参照）"
+)
+# PATHに無くても代表的な配置先にあれば見つける（テストでは差し替え可能にしてある）
+_OLLAMA_FALLBACK_PATHS = (
+    Path("/usr/local/bin/ollama"),
+    Path("/usr/bin/ollama"),
+)
+OLLAMA_NOT_INSTALLED_MSG = "Ollamaが未インストールです。先に上の「Ollamaをインストール」を実行してください。"
+
+
+def find_ollama() -> str | None:
+    """ollama コマンドの実在を毎回確認する（キャッシュしない）。
+    GUI（デスクトップランチャー）から起動されたアプリはPATHが狭いことが
+    あるため、shutil.which に加えて代表的な配置先も探す。"""
+    found = shutil.which("ollama")
+    if found:
+        return found
+    for cand in (*_OLLAMA_FALLBACK_PATHS, Path.home() / ".local" / "bin" / "ollama"):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
+
+def _tail_lines(text: str, n: int = 5) -> str:
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+    return "\n".join(l[:200] for l in lines[-n:])
+
+
+def _install_failure_message(detail: str) -> str:
+    parts = ["Ollamaのインストールに失敗しました。"]
+    if detail:
+        parts.append(detail)
+    parts.append("ターミナルで次のコマンドを実行してください:\n  " + OLLAMA_INSTALL_CMD)
+    parts.append(OLLAMA_ADMIN_HINT)
+    return "\n".join(parts)
+
+
+def run_ollama_install(on_done) -> None:
+    """公式インストールスクリプトをバックグラウンドで実行し、終了後に
+    on_done(ok, message) を呼ぶ（ワーカースレッドから呼ばれるため、UI更新は
+    Signal経由で行うこと）。
+
+    成功判定は「終了コード0」だけでは不十分で、必ず find_ollama() で
+    実際にバイナリが存在することを確認する。`curl ... | sh` はパイプの
+    終了コードが末尾の sh のものになるため、curlが無い・接続できない場合でも
+    sh が空入力を受けて 0 で終了し、実際には何もインストールされていないのに
+    「成功」になる不具合があった（実機で確認済み）。そのため set -o pipefail
+    も併用している。"""
+    def _worker():
+        if shutil.which("curl") is None:
+            on_done(False, _install_failure_message(
+                "curl が見つかりません。先に「sudo apt install curl」を実行してください。"
+            ))
+            return
+        try:
+            # start_new_session: タイムアウト時に sh 側の子プロセスごと止められるようにする
+            proc = subprocess.Popen(
+                ["bash", "-c", "set -o pipefail; " + OLLAMA_INSTALL_CMD],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=True,
+            )
+            try:
+                out, err = proc.communicate(timeout=OLLAMA_INSTALL_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    pass
+                proc.communicate()
+                on_done(False, _install_failure_message(
+                    f"{OLLAMA_INSTALL_TIMEOUT_S // 60}分以内に完了しませんでした。"
+                ))
+                return
+        except Exception as e:
+            on_done(False, _install_failure_message(str(e)))
+            return
+
+        if proc.returncode == 0 and find_ollama() is not None:
+            on_done(True, "インストール完了！")
+        else:
+            detail = _tail_lines(err) or _tail_lines(out)
+            if proc.returncode == 0:
+                detail = (detail + "\n" if detail else "") + "インストールは終了しましたが、ollamaコマンドが見つかりません。"
+            on_done(False, _install_failure_message(detail))
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+class _InstallSignals(QObject):
+    """Ollamaインストールのワーカースレッド → UIスレッドへの通知用"""
+    done = Signal(bool, str)   # (成功?, メッセージ)
+
+
 class _PullSignals(QObject):
     """ollama pull のワーカースレッド → UIスレッドへの通知用"""
     progress = Signal(str)
@@ -36,12 +152,17 @@ def pull_ollama_model(model: str, on_progress=None, on_done=None) -> None:
     """`ollama pull <model>` をバックグラウンドスレッドで実行する。
     on_progress(line) / on_done(ok, model_or_error) はワーカースレッドから
     呼ばれるため、UI更新はSignal経由（_PullSignals）で行うこと。"""
-    import threading
-
     def _worker():
+        # 未インストールのままpullを試みると生のFileNotFoundErrorが出るだけなので、
+        # 実行前に実在を確認して分かりやすい案内を返す
+        ollama_bin = find_ollama()
+        if ollama_bin is None:
+            if on_done:
+                on_done(False, OLLAMA_NOT_INSTALLED_MSG)
+            return
         try:
             proc = subprocess.Popen(
-                ["ollama", "pull", model],
+                [ollama_bin, "pull", model],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             )
             last = ""
@@ -257,50 +378,44 @@ def show_settings_dialog(config: dict, js_eval_fn):
     ollama_row.addWidget(install_btn)
     ai_l.addLayout(ollama_row)
 
-    ollama_installed = subprocess.run(["which", "ollama"], capture_output=True).returncode == 0
-    if ollama_installed:
-        ollama_status.setText("✓ Ollama インストール済み")
-        ollama_status.setStyleSheet("color: rgba(100,255,150,0.7); font-size: 12px;")
-        install_btn.setVisible(False)
-    else:
-        ollama_status.setText("✗ Ollamaが見つかりません")
-        ollama_status.setStyleSheet("color: rgba(255,100,100,0.7); font-size: 12px;")
-
     progress_lbl = QLabel("")
     progress_lbl.setStyleSheet("color: rgba(255,255,255,0.3); font-size: 10px;")
     progress_lbl.setWordWrap(True)
+    progress_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     ai_l.addWidget(progress_lbl)
 
-    def on_install_ollama():
-        import threading
-        from PySide6.QtCore import QMetaObject, Q_ARG
-        install_btn.setEnabled(False)
-        progress_lbl.setText("インストール中...")
-        def do_install():
-            try:
-                result = subprocess.run(
-                    ["bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh"],
-                    capture_output=True, text=True, timeout=120,
-                )
-                if result.returncode == 0:
-                    QMetaObject.invokeMethod(ollama_status, "setText",
-                        Qt.ConnectionType.QueuedConnection, Q_ARG(str, "✓ Ollama インストール済み"))
-                    ollama_status.setStyleSheet("color: rgba(100,255,150,0.7); font-size: 12px;")
-                    QMetaObject.invokeMethod(progress_lbl, "setText",
-                        Qt.ConnectionType.QueuedConnection, Q_ARG(str, "インストール完了！"))
-                    QMetaObject.invokeMethod(install_btn, "setVisible",
-                        Qt.ConnectionType.QueuedConnection, Q_ARG(bool, False))
-                else:
-                    QMetaObject.invokeMethod(progress_lbl, "setText",
-                        Qt.ConnectionType.QueuedConnection, Q_ARG(str, f"エラー: {result.stderr[:100]}"))
-                    install_btn.setEnabled(True)
-            except Exception as e:
-                QMetaObject.invokeMethod(progress_lbl, "setText",
-                    Qt.ConnectionType.QueuedConnection, Q_ARG(str, f"エラー: {e}"))
-                install_btn.setEnabled(True)
-        threading.Thread(target=do_install, daemon=True).start()
+    install_signals = _InstallSignals(dialog)
 
-    install_btn.clicked.connect(on_install_ollama)
+    def refresh_ollama_status():
+        """ollamaの実在を毎回確認して表示を更新する（起動時1回だけの判定にしない）"""
+        if find_ollama() is not None:
+            ollama_status.setText("✓ Ollama インストール済み")
+            ollama_status.setStyleSheet("color: rgba(100,255,150,0.7); font-size: 12px;")
+            install_btn.setVisible(False)
+        else:
+            ollama_status.setText("✗ Ollamaが見つかりません")
+            ollama_status.setStyleSheet("color: rgba(255,100,100,0.7); font-size: 12px;")
+            install_btn.setVisible(True)
+            install_btn.setEnabled(True)
+
+    refresh_ollama_status()
+
+    def on_install_done(ok, message):
+        progress_lbl.setText(message)
+        refresh_ollama_status()
+        if ok:
+            # 未導入のため出していたモデルDLの案内を消し、DLボタンを有効な状態に戻す
+            model_msg.setText("")
+        refresh_default_row()
+
+    install_signals.done.connect(on_install_done)
+
+    def on_install_ollama():
+        install_btn.setEnabled(False)
+        progress_lbl.setText("インストール中...（数分かかることがあります）")
+        run_ollama_install(install_signals.done.emit)
+
+    install_btn.clicked.connect(lambda checked=False: on_install_ollama())
 
     SELECTED_STYLE = (
         "QPushButton{border-radius:6px;padding:4px 10px;font-size:11px;"
@@ -403,6 +518,9 @@ def show_settings_dialog(config: dict, js_eval_fn):
                 model_msg.setText(f"✓ {info} のダウンロードが完了しました")
             else:
                 refresh_scan_list()
+        elif info == OLLAMA_NOT_INSTALLED_MSG:
+            model_msg.setText(info)
+            refresh_ollama_status()
         else:
             model_msg.setText(f"ダウンロード失敗: {info}")
         refresh_default_row()
@@ -412,6 +530,11 @@ def show_settings_dialog(config: dict, js_eval_fn):
 
     def on_default_btn():
         if default_mode["v"] == "download":
+            # Ollama未導入ならpullを実行せず案内だけ出す
+            if find_ollama() is None:
+                refresh_ollama_status()
+                model_msg.setText(OLLAMA_NOT_INSTALLED_MSG)
+                return
             default_btn.setEnabled(False)
             default_btn.setText("DL中...")
             model_msg.setText("ダウンロードを開始します...")
@@ -421,6 +544,8 @@ def show_settings_dialog(config: dict, js_eval_fn):
 
     default_btn.clicked.connect(lambda checked=False: on_default_btn())
     refresh_default_row()
+    if find_ollama() is None:
+        model_msg.setText(OLLAMA_NOT_INSTALLED_MSG)
 
     # --- 折りたたみ: 他のモデルを使う（上級者向け） ---
     adv_toggle = QPushButton("▶ 他のモデルを使う（上級者向け）")
@@ -513,7 +638,9 @@ def show_settings_dialog(config: dict, js_eval_fn):
         model_state["installed"] = installed
         set_model(name)
         if installed is not None and not model_installed(name, installed):
-            if _confirm_dialog(
+            if find_ollama() is None:
+                model_msg.setText(OLLAMA_NOT_INSTALLED_MSG)
+            elif _confirm_dialog(
                 dialog,
                 f"{name} はまだダウンロードされていません。\n今ダウンロードしますか？",
                 "ダウンロードする", "設定だけ行う",
