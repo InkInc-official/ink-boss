@@ -210,6 +210,40 @@ def _gather_process_diagnostics(root_pid: int) -> str:
     return "\n".join(lines)
 
 
+def _sanitize_env_for_electron(env: dict[str, str]) -> dict[str, str]:
+    """PyInstaller(--onedir)のブートローダーは、同梱ライブラリを優先させる
+    ためLD_LIBRARY_PATHに_internalディレクトリを追加する。さらに、
+    PySide6が間接的に依存するGTK/GI関連のPyInstallerランタイムフック
+    （pyi_rth_gtk.py等、ビルドログで実際に確認済み）が、GTK_PATH・
+    GTK_EXE_PREFIX・GTK_DATA_PREFIX・GI_TYPELIB_PATHを_internal配下へ
+    向ける。
+
+    これをそのままElectronの子プロセスへ継承させると、Electronが
+    システムのlibgtk-3.so.0（fcitx5用GTKモジュールが登録された環境）
+    ではなく、Ink Boss同梱の（ABIが異なる可能性がある）libgtk-3.so.0を
+    誤ってロードしてしまい、結果としてfcitx5用GTKモジュール
+    (im-fcitx5.so)が正しくロードされないことが創作PCの実機検証で
+    判明した（以前修正したdump_ime_debug_info内のdbus-send /
+    libdbus-1.so.3のバージョン不一致バグと全く同じ構造の問題）。
+
+    Electronは自身の依存ライブラリを全て同梱しているため、これらの
+    変数を継承する必要は本来ない。PyInstallerがLD_LIBRARY_PATHの
+    元の値をLD_LIBRARY_PATH_ORIGへ退避している場合はそれを復元し
+    （ユーザーが元々LD_LIBRARY_PATHを設定していた場合に、その設定を
+    壊さないため）、退避されていなければ単に削除する。GTK_PATH等は
+    Electron自身には無関係なため単純に削除する。GTK_IM_MODULE・
+    XMODIFIERS・DISPLAY等、IME判定に必要な変数はそのまま残す。"""
+    sanitized = dict(env)
+    orig_ld = sanitized.pop("LD_LIBRARY_PATH_ORIG", None)
+    if orig_ld is not None:
+        sanitized["LD_LIBRARY_PATH"] = orig_ld
+    else:
+        sanitized.pop("LD_LIBRARY_PATH", None)
+    for key in ("GTK_PATH", "GTK_EXE_PREFIX", "GTK_DATA_PREFIX", "GI_TYPELIB_PATH"):
+        sanitized.pop(key, None)
+    return sanitized
+
+
 def cleanup_orphaned_electron_processes() -> None:
     """前回の異常終了（Qt側クラッシュ・SIGKILL・ハードウォッチドッグの
     os._exit等）でElectronヘルパーの終了処理が走らなかった場合、
@@ -341,7 +375,7 @@ class ElectronEngine:
                 self._failed = True
                 return False
 
-            env = os.environ.copy()
+            env = _sanitize_env_for_electron(os.environ.copy())
             env["INK_ELECTRON_PORT"] = "0"
             try:
                 from ime import log_ime_env
@@ -357,7 +391,7 @@ class ElectronEngine:
             try:
                 from ime import log_gtk_diagnostics
                 real_elf = ENGINE_DIR / "node_modules" / "electron" / "dist" / "electron"
-                log_gtk_diagnostics(str(real_elf) if real_elf.exists() else binary)
+                log_gtk_diagnostics(str(real_elf) if real_elf.exists() else binary, env)
             except Exception:
                 pass
             cmd = [binary, str(ENGINE_DIR / "main.js")]

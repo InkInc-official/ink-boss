@@ -466,11 +466,20 @@ def dump_ime_debug_info(sid: str, active_element: str = "", proc_diag: str = "")
 # Electronプロセスのメモリマップに im-fcitx5.so がロードされているか
 # （dump_ime_debug_info と併用、_gather_process_diagnostics 側で確認）
 # という、ビルド設定に依存しない方法で代替する。
-def log_gtk_diagnostics(electron_binary: str) -> None:
+def log_gtk_diagnostics(electron_binary: str, electron_env: dict | None = None) -> None:
     """Electron起動のたびに一度、GTK/fcitx5関連の静的な環境情報を
     IME_DEBUG_LOG に追記する（F12を押さなくても起動時に自動で記録される）。
     .debパッケージを複数の環境（事務所PC・創作PC等）へ配布した際に、
-    パッケージ構成やGTKのバージョン差を比較する目的。"""
+    パッケージ構成やGTKのバージョン差を比較する目的。
+
+    electron_env: 実際にElectron子プロセスへ渡す（サニタイズ後の）環境変数。
+    Ink Boss本体（Qt側）自身のプロセス環境でlddを実行すると、PyInstallerの
+    LD_LIBRARY_PATHをそのまま引き継いでしまい、実際にElectronが使う
+    ライブラリとは異なる（サニタイズ前の）解決結果を表示してしまう
+    （electron_bridge.pyの_sanitize_env_for_electron参照）。ここでは
+    Electronに実際に渡る環境でlddを実行することで、診断結果と実際の
+    動作を一致させる。省略時は現在のプロセス環境を使う（開発時の
+    python3 main.py直接実行など、サニタイズ不要な場合向け）。"""
     import datetime
 
     lines = [f"===== {datetime.datetime.now().isoformat()} Electron起動時のGTK/fcitx5診断 ====="]
@@ -478,6 +487,7 @@ def log_gtk_diagnostics(electron_binary: str) -> None:
     try:
         result = subprocess.run(
             ["ldd", electron_binary], capture_output=True, text=True, timeout=5,
+            env=electron_env,
         )
         out = result.stdout or result.stderr
         gtk_lines = [ln.strip() for ln in out.splitlines() if "gtk" in ln.lower()]
