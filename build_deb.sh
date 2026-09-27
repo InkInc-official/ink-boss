@@ -111,6 +111,8 @@ fi
 # window.py が実行時に直接呼び出しており、無いとウィンドウ制御が
 # 機能しない（Depends）。fcitx5-remote(bridge.py) はfcitx5未導入
 # 環境ではibusにフォールバックする設計のためRecommendsに留める。
+# fcitx5-frontend-gtk3 は Electron エンジンのサービスで fcitx5 の日本語入力を
+# 使うためのGTKモジュール（無いとElectron側でIMEが接続されない）。
 # ollamaはアプリ内の「インストール」ボタンで案内する完全な任意
 # 機能のため、ここには含めない。
 cat > "$PKG_DIR/DEBIAN/control" << EOF
@@ -120,7 +122,7 @@ Section: utils
 Priority: optional
 Architecture: ${ARCH}
 Depends: libnss3, libatk-bridge2.0-0, libgtk-3-0, libxss1, libgbm1, wmctrl, xdotool, x11-utils
-Recommends: fcitx5
+Recommends: fcitx5, fcitx5-frontend-gtk3
 Maintainer: 黒井葉跡 <inkinc.official@gmail.com>
 Description: Ink Boss - Ink Inc. 配信特化PCワークスペース
  Ink Inc.所属ライバー向けの配信特化PCワークスペースツール。

@@ -11,8 +11,10 @@ Ink Boss / Ink Inc.
     print(f"[IME] backend={ime_backend}")
 """
 
+import glob
 import os
 import re
+import socket
 import subprocess
 import shutil
 from pathlib import Path
@@ -31,44 +33,102 @@ def _machine_id() -> str | None:
 
 def _ibus_address_files() -> list[Path]:
     """Qtのibusプラグインがibusバスのアドレスファイルとして探すパス
-    （~/.config/ibus/bus/<machine-id>-<host>-<display番号>）。
-    Waylandセッション上のXWayland等では WAYLAND_DISPLAY 名のファイルになる。"""
+    （~/.config/ibus/bus/<machine-id>-<host>-<display>）。
+
+    Qtは WAYLAND_DISPLAY が設定されていればそちらを優先して
+    「-unix-<WAYLAND_DISPLAY>」を、無ければ DISPLAY から「-unix-<番号>」を開く
+    （strace で確認済み。両方設定されている混在環境でも wayland 側を開く）。
+    fcitx5 は X11 セッション（WAYLAND_DISPLAY 未設定）でも、同一内容の
+    「-unix-<番号>」「-unix-wayland-0」の2ファイルを常に作る（同じアドレス・同じPID）
+    ため、2ファイルが併存していること自体は環境変数混在の兆候ではない。"""
     mid = _machine_id()
     if not mid:
         return []
     cfg = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
     bus_dir = cfg / "ibus" / "bus"
-    names = []
-    display = os.environ.get("DISPLAY", "")
-    if display:
-        host, _, rest = display.partition(":")
-        names.append(f"{mid}-{host or 'unix'}-{rest.split('.')[0] or '0'}")
     wayland = os.environ.get("WAYLAND_DISPLAY")
+    display = os.environ.get("DISPLAY", "")
     if wayland:
-        names.append(f"{mid}-unix-{wayland}")
-    if not names:
-        names.append(f"{mid}-unix-0")
-    return [bus_dir / n for n in names]
+        name = f"{mid}-unix-{wayland}"
+    elif display:
+        host, _, rest = display.partition(":")
+        name = f"{mid}-{host or 'unix'}-{rest.split('.')[0] or '0'}"
+    else:
+        name = f"{mid}-unix-0"
+    return [bus_dir / name]
+
+
+def _ibus_socket_connectable(address: str) -> bool | None:
+    """IBUS_ADDRESS の unix ソケットに実際に接続できるか。
+    True/False。判定できない形式（tcp等）は None（＝否定しない）。"""
+    for part in address.split(","):
+        if part.startswith("unix:path="):
+            target = part[len("unix:path="):]
+        elif part.startswith("unix:abstract="):
+            target = "\0" + part[len("unix:abstract="):]
+        else:
+            continue
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        try:
+            s.connect(target)
+            return True
+        except OSError:
+            return False
+        finally:
+            s.close()
+    return None
+
+
+def ibus_bus_status() -> list[dict]:
+    """Qtが開くアドレスファイルの状態（存在・PID生存・ソケット接続可否）。"""
+    out = []
+    for f in _ibus_address_files():
+        st = {"file": str(f), "exists": False, "pid": None, "pid_alive": False, "socket_ok": None}
+        try:
+            text = f.read_text()
+        except OSError:
+            out.append(st)
+            continue
+        st["exists"] = True
+        m = re.search(r"^IBUS_DAEMON_PID=(\d+)", text, re.MULTILINE)
+        if m:
+            st["pid"] = int(m.group(1))
+            st["pid_alive"] = Path(f"/proc/{m.group(1)}").exists()
+        a = re.search(r"^IBUS_ADDRESS=(.+)$", text, re.MULTILINE)
+        if a and st["pid_alive"]:
+            st["socket_ok"] = _ibus_socket_connectable(a.group(1).strip())
+        out.append(st)
+    return out
 
 
 def ibus_bus_alive() -> tuple[bool, str]:
     """ibusバス（ibus-daemon、または fcitx5 の ibus フロントエンド）が実際に
-    接続可能な状態かを、アドレスファイルとそのデーモンPIDの生存で判定する。
+    接続可能な状態かを判定する。アドレスファイルの存在に加え、記載PIDの生存と、
+    ソケットへの実接続で確認する。
 
     「ibus-daemon というプロセスがいるか」では判定できない。fcitx5 は自前の
     ibusフロントエンドが ibus-daemon 無しでも同じアドレスファイルを作るため、
     ibus-daemon 不在の環境でも同梱ibusプラグイン経由でfcitx5に接続できる
     （隔離環境で実証済み: fcitx5側に frontend:ibus の入力コンテキストが作られる）。
-    逆に、前回セッションの古いファイル（PIDが死んでいる）は接続できないので除外する。"""
-    for f in _ibus_address_files():
-        try:
-            text = f.read_text()
-        except OSError:
-            continue
-        m = re.search(r"^IBUS_DAEMON_PID=(\d+)", text, re.MULTILINE)
-        if m and Path(f"/proc/{m.group(1)}").exists():
-            return True, str(f)
+    逆に、前回セッションの古いファイル（PIDが死んでいる／PIDが別プロセスに再利用
+    されてソケットが無い）は接続できないので除外する。"""
+    for st in ibus_bus_status():
+        if st["exists"] and st["pid_alive"] and st["socket_ok"] is not False:
+            return True, st["file"]
     return False, ""
+
+
+def _gtk_immodule_exists(name: str) -> bool:
+    """GTK3 の入力メソッドモジュール（im-<name>.so）が導入されているか。
+    Electron(Chromium/GTK)のIMEは GTK_IM_MODULE のモジュールが実在しないと
+    一切接続されない（隔離環境で確認済み）。"""
+    patterns = [
+        f"/usr/lib/*/gtk-3.0/*/immodules/im-{name}.so",
+        f"/usr/lib/gtk-3.0/*/immodules/im-{name}.so",
+        f"/usr/lib64/gtk-3.0/*/immodules/im-{name}.so",
+    ]
+    return any(glob.glob(p) for p in patterns)
 
 
 def setup_ime() -> str:
@@ -115,14 +175,40 @@ def setup_ime() -> str:
                         pass
         return False
 
-    def _apply_env(module: str) -> None:
+    def _apply_env(qt_module: str, gtk_module: str | None = None, xim: str | None = None) -> None:
         """IM関連の環境変数を強制上書きする（setdefault 禁止。シェルの
-        QT_IM_MODULE=fcitx 等が残っていると意図した経路にならない）"""
-        os.environ["QT_IM_MODULE"] = module
-        os.environ["XMODIFIERS"] = f"@im={module}"
-        os.environ["GTK_IM_MODULE"] = module
-        os.environ["INPUT_METHOD"] = module
-        os.environ["SDL_IM_MODULE"] = module
+        QT_IM_MODULE=fcitx 等が残っていると意図した経路にならない）。
+
+        Qt（同梱ibusプラグイン）と GTK（Electron/Chromium）は別経路なので
+        別々に指定できる。GTK_IM_MODULE は Electron サブプロセスにも継承される。"""
+        gtk_module = gtk_module or qt_module
+        os.environ["QT_IM_MODULE"] = qt_module
+        os.environ["XMODIFIERS"] = f"@im={xim or qt_module}"
+        os.environ["GTK_IM_MODULE"] = gtk_module
+        os.environ["INPUT_METHOD"] = qt_module
+        os.environ["SDL_IM_MODULE"] = qt_module
+
+    def _pick_gtk_module_for_fcitx5() -> str:
+        """fcitx5 利用時の GTK_IM_MODULE（＝Electronサービスの日本語入力）。
+        fcitx5のGTKモジュール(im-fcitx5.so)があれば、それを明示的に指定する
+        （ibus不要で直接接続でき、GTKはABI安定のためQtのようなバージョン不一致も無い）。
+
+        隔離環境での実測: GTK_IM_MODULE=ibus のまま ibus用GTKモジュールが無くても、
+        fcitx5のGTKモジュールがあればGTKがロケール既定のモジュールへフォールバック
+        して接続できる。ただしそれは暗黙のフォールバック頼みなので、明示指定して
+        挙動を決定的にする。fcitx5/ibus どちらのGTKモジュールも無い場合は、
+        どの値にしてもElectron側のIMEは接続されない（実測）。"""
+        if _gtk_immodule_exists("fcitx5"):
+            return "fcitx"
+        if _gtk_immodule_exists("ibus"):
+            return "ibus"
+        print(
+            "[IME] 注意: GTK用のfcitx5/ibusモジュールが見つかりません。Electronエンジンの"
+            "サービスで日本語入力できない可能性があります。fcitx5-frontend-gtk3 を"
+            "インストールしてください（例: sudo apt install fcitx5-frontend-gtk3）。",
+            flush=True,
+        )
+        return "fcitx"
 
     fcitx5_running = (
         subprocess.run(["pgrep", "-x", "fcitx5"], capture_output=True).returncode == 0
@@ -132,6 +218,17 @@ def setup_ime() -> str:
     )
 
     ibus_bus_ok, ibus_bus_file = ibus_bus_alive()
+    if fcitx5_running or ibus_running:
+        for st in ibus_bus_status():
+            if not st["exists"]:
+                print(f"[IME] ibusバス: アドレスファイルなし（Qtが探す場所: {st['file']}）", flush=True)
+            else:
+                sock = {True: "接続OK", False: "接続NG", None: "不明"}[st["socket_ok"]]
+                print(
+                    f"[IME] ibusバス: {st['file']} pid={st['pid']}"
+                    f"({'生存' if st['pid_alive'] else '死亡'}) socket={sock}",
+                    flush=True,
+                )
 
     # 重要:
     # システムの libfcitx5platforminputcontextplugin.so は distro の Qt6 向けで、
@@ -143,24 +240,29 @@ def setup_ime() -> str:
     if fcitx5_running:
         _link_plugin("libfcitx5platforminputcontextplugin.so")  # 直接接続用（環境によっては動く）
         _link_plugin("libibusplatforminputcontextplugin.so")
+        gtk_mod = _pick_gtk_module_for_fcitx5()
         if ibus_running or ibus_bus_ok:
-            _apply_env("ibus")
+            # Qt: 同梱ibusプラグイン → fcitx5のibusフロントエンド(またはibus-daemon)
+            # XIM は ibus-daemon が居ればそのまま、居なければ fcitx5 のXIMを指す
+            _apply_env("ibus", gtk_mod, xim=None if ibus_running else "fcitx")
             if ibus_running:
                 backend = "fcitx5(via ibus)"
             else:
                 backend = "fcitx5(via ibus frontend, no ibus-daemon)"
                 print(f"[IME] ibus-daemon は無いが、fcitx5のibusフロントエンドが有効: {ibus_bus_file}", flush=True)
+            print(f"[IME] Qt=ibus / GTK(Electron)={gtk_mod}", flush=True)
             return backend
         # ibus-daemon も、fcitx5のibusフロントエンドが作るアドレスファイルも無い
         # ＝ ibus経路では接続先が無い。fcitx5 のネイティブQtプラグインへ直接接続する。
-        _apply_env("fcitx")
+        _apply_env("fcitx", gtk_mod)
         print(
             "[IME] 注意: ibusバスが見つからないため fcitx5 へ直接接続します。"
             "ネイティブプラグインがPySide6同梱Qtとバージョン不一致でロードできない環境では"
-            "IMEが有効になりません。その場合は fcitx5-configtool の「アドオン」で"
+            "Qt側のIMEが有効になりません。その場合は fcitx5-configtool の「アドオン」で"
             "「IBus フロントエンド」を有効にしてください。",
             flush=True,
         )
+        print(f"[IME] Qt=fcitx / GTK(Electron)={gtk_mod}", flush=True)
         return "fcitx5(direct, no ibus)"
 
     elif ibus_running:
