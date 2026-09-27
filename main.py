@@ -16,7 +16,7 @@ import sys
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # IME設定：すべてのimport・QApplication生成より前に必須
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-from ime import setup_ime, log_ime_env
+from ime import setup_ime, log_ime_env, dump_ime_debug_info
 _ime_backend = setup_ime()
 print(f"[IME] backend={_ime_backend}", flush=True)
 
@@ -65,6 +65,10 @@ bridge.electron = electron_engine
 # stdoutマーカー行(INK_ELECTRON_ADD_SERVICE)→electron_bridgeの
 # バックグラウンドスレッド→Signal経由でQtメインスレッドへ。
 electron_engine.on_add_service_requested = lambda url: bridge.electron_add_service_signal.emit(url)
+# 【デバッグ専用・調査完了後に削除】IME(fcitx5)不具合の切り分け用。GUI操作を
+# 一切行わない（dbus-send呼び出し+ファイル書き込みのみ）ため、Qtメインスレッド
+# への切り替え（Signal経由）は不要で、stdout読み取りスレッドから直接呼ぶ。
+electron_engine.on_ime_debug_requested = dump_ime_debug_info
 
 # Aide幅（set_aide_widthで更新される）
 _aide_width = 0

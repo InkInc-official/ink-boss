@@ -380,3 +380,56 @@ def setup_ime() -> str:
     backend = _setup_ime_impl()
     log_ime_env("setup_ime による上書き後")
     return backend
+
+
+# ─────────────────────────────────────────────────────────
+# 【デバッグ専用・調査完了後に削除】IME(fcitx5)不具合の切り分け用。
+#
+# 外部ターミナルへ切り替えて dbus-send を打つと、Ink Boss自身の
+# 「フォーカスが外れたらElectronを隠す」仕組み(main.pyのフォーカス
+# 監視)が働いてしまい、検証中のウィンドウの表示状態が変わってしまう
+# （＝診断行為自体が症状に影響する）。ウィンドウ切り替えなしで
+# 診断情報を取れるよう、Electron側でF12が押されたときにPythonの
+# プロセス内からfcitx5へ直接問い合わせ、ログファイルに書き出す。
+# ─────────────────────────────────────────────────────────
+IME_DEBUG_LOG = Path.home() / ".config" / "ink-boss" / "ime-debug.log"
+
+
+def dump_ime_debug_info(sid: str, active_element: str = "") -> None:
+    """fcitx5のDebugInfo（dbus-send相当）と、その時点のIME関連環境変数、
+    Webページ側の実際のフォーカス要素（document.activeElement）を
+    IME_DEBUG_LOG に追記する。main.jsでF12が押されたとき、
+    electron_bridge.ElectronEngine.on_ime_debug_requested 経由で呼ばれる。"""
+    import datetime
+    import subprocess as sp
+
+    lines = [f"===== {datetime.datetime.now().isoformat()} sid={sid} ====="]
+    lines.append(describe_ime_env())
+    lines.append(f"document.activeElement: {active_element or '(取得できず)'}")
+
+    try:
+        result = sp.run(
+            [
+                "dbus-send", "--session", "--print-reply",
+                "--dest=org.fcitx.Fcitx5", "/controller",
+                "org.fcitx.Fcitx.Controller1.DebugInfo",
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+        out = result.stdout or result.stderr
+        ic_lines = [ln.strip() for ln in out.splitlines() if "IC [" in ln]
+        if ic_lines:
+            lines.append("fcitx5 IC一覧:")
+            lines.extend(f"  {ln}" for ln in ic_lines)
+        else:
+            lines.append(f"fcitx5 DebugInfo: IC行なし（生出力）: {out[:300]!r}")
+    except Exception as e:
+        lines.append(f"fcitx5 DebugInfo取得失敗: {e}")
+
+    try:
+        IME_DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(IME_DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n\n")
+        print(f"[IME-DEBUG] ログを書き出しました: {IME_DEBUG_LOG}", flush=True)
+    except Exception as e:
+        print(f"[IME-DEBUG] ログ書き出し失敗: {e}", flush=True)

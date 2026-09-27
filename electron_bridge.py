@@ -39,6 +39,7 @@ def _resolve_base_dir() -> Path:
 ENGINE_DIR = _resolve_base_dir() / "electron-engine"
 READY_PREFIX = "INK_ELECTRON_READY port="
 ADD_SERVICE_PREFIX = "INK_ELECTRON_ADD_SERVICE "
+IME_DEBUG_PREFIX = "INK_ELECTRON_IME_DEBUG "  # 【デバッグ専用・調査完了後に削除】
 START_TIMEOUT_S = 25.0
 
 
@@ -215,6 +216,10 @@ class ElectronEngine:
         # （バックグラウンドスレッドから呼ばれるため、呼び出し側で
         # Qtメインスレッドへの受け渡しを行うこと）。
         self.on_add_service_requested: Callable[[str], None] | None = None
+        # 【デバッグ専用・調査完了後に削除】IME(fcitx5)不具合の切り分け用。
+        # Electron側でF12が押されたとき(そのウィンドウが実際にフォーカスされて
+        # いる時のみ発火)に呼ばれる。main.jsからのstdoutマーカー行経由。
+        self.on_ime_debug_requested: Callable[[str, str], None] | None = None
 
     @property
     def port(self) -> int | None:
@@ -311,6 +316,14 @@ class ElectronEngine:
                     if url and self.on_add_service_requested:
                         try:
                             self.on_add_service_requested(url)
+                        except Exception:
+                            pass
+                elif line.startswith(IME_DEBUG_PREFIX):
+                    rest = line[len(IME_DEBUG_PREFIX) :].strip()
+                    sid, _, active_element = rest.partition(" ")
+                    if sid and self.on_ime_debug_requested:
+                        try:
+                            self.on_ime_debug_requested(sid, active_element)
                         except Exception:
                             pass
                 elif line:

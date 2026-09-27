@@ -129,6 +129,33 @@ function createServiceWindow(sid, url, opts = {}) {
     return { action: "deny" };
   });
 
+  // 【デバッグ専用・調査完了後に削除】IME(fcitx5)不具合の切り分け用。
+  // 診断のために外部ターミナルへ切り替えると、Ink Boss自身の「フォーカスが
+  // 外れたらElectronを隠す」仕組みが働いてしまい、検証中のウィンドウの表示
+  // 状態が変わってしまう（＝診断行為自体が症状を変えてしまう）ため、
+  // ウィンドウ切り替えなしで診断情報を取れるようにする。
+  // globalShortcutではなくbefore-input-eventにしているのは、システム全体で
+  // F12を奪うと他アプリのDevTools等と衝突するため、「このElectronウィンドウが
+  // 実際にフォーカスされている時だけ」に限定するため。
+  win.webContents.on("before-input-event", (event, input) => {
+    if (input.type === "keyDown" && input.key === "F12" && !input.control && !input.alt && !input.meta) {
+      event.preventDefault();
+      win.webContents
+        .executeJavaScript(
+          "(() => { const e = document.activeElement; if (!e) return 'null'; " +
+          "return e.tagName + (e.id ? '#'+e.id : '') + " +
+          "' isContentEditable=' + e.isContentEditable + " +
+          "' hasFocus=' + document.hasFocus(); })()"
+        )
+        .then((info) => {
+          process.stdout.write(`INK_ELECTRON_IME_DEBUG ${sid} ${info}\n`);
+        })
+        .catch((err) => {
+          process.stdout.write(`INK_ELECTRON_IME_DEBUG ${sid} (JS取得失敗:${err})\n`);
+        });
+    }
+  });
+
   // ページ内右クリックメニュー。ElectronはQtWebEngineと違いデフォルトの
   // ネイティブコンテキストメニューを持たないため、標準的なブラウザ項目
   // （戻る/進む/再読み込み、選択時のコピー、入力欄でのカット/コピー/
