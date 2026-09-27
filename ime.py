@@ -20,6 +20,25 @@ import shutil
 from pathlib import Path
 
 
+# [IME-DEBUG] ログで出す環境変数。子プロセス（Qt本体・Electron）が実際に受け取る値を
+# 「上書きした後」の状態で確認するためのもの（起動前の値だけでは、IMEが効かない原因が
+# 上書きにあるのかシステム側にあるのか切り分けられない）。
+_IME_ENV_KEYS = (
+    "QT_IM_MODULE", "GTK_IM_MODULE", "XMODIFIERS", "INPUT_METHOD", "SDL_IM_MODULE",
+    "DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE", "QT_PLUGIN_PATH",
+)
+
+
+def describe_ime_env(env=None) -> str:
+    env = os.environ if env is None else env
+    return " ".join(f"{k}={env.get(k) if env.get(k) is not None else '(未設定)'}" for k in _IME_ENV_KEYS)
+
+
+def log_ime_env(label: str, env=None) -> None:
+    """例: [IME-DEBUG] Electron子プロセスへ渡す環境変数: QT_IM_MODULE=ibus GTK_IM_MODULE=fcitx ..."""
+    print(f"[IME-DEBUG] {label}: {describe_ime_env(env)}", flush=True)
+
+
 def _machine_id() -> str | None:
     for path in ("/var/lib/dbus/machine-id", "/etc/machine-id"):
         try:
@@ -131,7 +150,7 @@ def _gtk_immodule_exists(name: str) -> bool:
     return any(glob.glob(p) for p in patterns)
 
 
-def setup_ime() -> str:
+def _setup_ime_impl() -> str:
     """
     IMEバックエンドを自動検出し、PySide6プラグインをリンクして環境変数を設定する。
 
@@ -142,6 +161,8 @@ def setup_ime() -> str:
              "fcitx5(direct, no ibus)"                      … ibusバスが無く、fcitx5へ直接接続
              "ibus" | "ibus(no daemon)" | "fcitx5(not running)" | "none"
     """
+    log_ime_env("setup_ime呼び出し前（システム側の値）")
+    system_env = {k: os.environ.get(k) for k in ("QT_IM_MODULE", "GTK_IM_MODULE", "XMODIFIERS")}
     try:
         import PySide6
         pyside_plugin_dir = (
@@ -175,18 +196,78 @@ def setup_ime() -> str:
                         pass
         return False
 
-    def _apply_env(qt_module: str, gtk_module: str | None = None, xim: str | None = None) -> None:
-        """IM関連の環境変数を強制上書きする（setdefault 禁止。シェルの
+    def _native_fcitx_plugin_loadable() -> tuple[bool, str]:
+        """システムのfcitx5用Qtプラグインを、いまのQt(PySide6同梱)が実際にロードできるか。
+        QPluginLoader でQt自身に判定させる（PRIVATE_APIの不一致は dlopen で失敗する）。
+        ロードできるのは PySide6 のQtとdistroのQt6が一致している環境に限られる。"""
+        try:
+            from PySide6.QtCore import QPluginLoader
+        except Exception as e:
+            return False, f"QPluginLoader を使えません: {e}"
+        for d in sys_plugin_dirs:
+            cand = d / "libfcitx5platforminputcontextplugin.so"
+            if cand.exists():
+                loader = QPluginLoader(str(cand))
+                ok = loader.load()
+                err = "" if ok else loader.errorString()
+                if ok:
+                    loader.unload()
+                return ok, err
+        return False, "システムにfcitx5用Qtプラグインが見つかりません"
+
+    def _apply_env(qt_module: str, gtk_module: str | None = None, xim: str | None = None,
+                   keep: frozenset = frozenset()) -> None:
+        """IM関連の環境変数を上書きする（setdefault 禁止。シェルの
         QT_IM_MODULE=fcitx 等が残っていると意図した経路にならない）。
 
         Qt（同梱ibusプラグイン）と GTK（Electron/Chromium）は別経路なので
-        別々に指定できる。GTK_IM_MODULE は Electron サブプロセスにも継承される。"""
+        別々に指定できる。GTK_IM_MODULE は Electron サブプロセスにも継承される。
+        keep に "qt" / "gtk" / "xim" を入れた項目は、システム側が既に設定している
+        値を尊重して上書きしない。"""
         gtk_module = gtk_module or qt_module
-        os.environ["QT_IM_MODULE"] = qt_module
-        os.environ["XMODIFIERS"] = f"@im={xim or qt_module}"
-        os.environ["GTK_IM_MODULE"] = gtk_module
-        os.environ["INPUT_METHOD"] = qt_module
-        os.environ["SDL_IM_MODULE"] = qt_module
+        if "qt" not in keep:
+            os.environ["QT_IM_MODULE"] = qt_module
+            os.environ["INPUT_METHOD"] = qt_module
+            os.environ["SDL_IM_MODULE"] = qt_module
+        if "xim" not in keep:
+            os.environ["XMODIFIERS"] = f"@im={xim or qt_module}"
+        if "gtk" not in keep:
+            os.environ["GTK_IM_MODULE"] = gtk_module
+
+    def _decide_keep() -> frozenset:
+        """システム側が既に fcitx（fcitx5 の互換名 "fcitx"/"fcitx5"）を設定している場合、
+        上書きせずにそのまま使える項目を判定する。
+
+        - GTK / XMODIFIERS: fcitx系ならそのまま尊重して問題ない（GTKはABI安定、
+          XIMはfcitx5が提供）。ただし GTK は fcitx5 の GTKモジュールが実在する場合のみ。
+        - Qt: システムのfcitx5用ネイティブプラグインは、PySide6同梱のQt(6.11.1)と
+          distroのQt6のバージョンが違うとロードできない(Qt_6_PRIVATE_API)。尊重して
+          もロードできなければQt側のIMEが無効になるだけなので、QPluginLoaderで
+          「実際にロードできる」ことを確認できた場合だけ尊重する。"""
+        fcitx_names = ("fcitx", "fcitx5")
+        keep = set()
+        qt_sys = system_env["QT_IM_MODULE"] or ""
+        if qt_sys in fcitx_names:
+            ok, err = _native_fcitx_plugin_loadable()
+            if ok:
+                keep.add("qt")
+                print(f"[IME] システムのQT_IM_MODULE={qt_sys}を尊重（ネイティブfcitx5プラグインはロード可能）", flush=True)
+            else:
+                print(
+                    f"[IME] システムのQT_IM_MODULE={qt_sys}は尊重できません"
+                    f"（PySide6同梱Qtではfcitx5用プラグインをロードできない）: {err[:160]}"
+                    " → 同梱ibusプラグイン経由に切り替えます",
+                    flush=True,
+                )
+        gtk_sys = system_env["GTK_IM_MODULE"] or ""
+        if gtk_sys in fcitx_names and _gtk_immodule_exists("fcitx5"):
+            keep.add("gtk")
+            print(f"[IME] システムのGTK_IM_MODULE={gtk_sys}を尊重", flush=True)
+        xm_sys = system_env["XMODIFIERS"] or ""
+        if xm_sys.startswith(("@im=fcitx",)):
+            keep.add("xim")
+            print(f"[IME] システムのXMODIFIERS={xm_sys}を尊重", flush=True)
+        return frozenset(keep)
 
     def _pick_gtk_module_for_fcitx5() -> str:
         """fcitx5 利用時の GTK_IM_MODULE（＝Electronサービスの日本語入力）。
@@ -241,10 +322,15 @@ def setup_ime() -> str:
         _link_plugin("libfcitx5platforminputcontextplugin.so")  # 直接接続用（環境によっては動く）
         _link_plugin("libibusplatforminputcontextplugin.so")
         gtk_mod = _pick_gtk_module_for_fcitx5()
+        keep = _decide_keep()
+        if "qt" in keep:
+            # システムのfcitx設定をそのまま使う（ネイティブfcitx5プラグインがロード可能な環境）
+            _apply_env(system_env["QT_IM_MODULE"], gtk_mod, xim="fcitx", keep=keep)
+            return "fcitx5(system env kept, native)"
         if ibus_running or ibus_bus_ok:
             # Qt: 同梱ibusプラグイン → fcitx5のibusフロントエンド(またはibus-daemon)
             # XIM は ibus-daemon が居ればそのまま、居なければ fcitx5 のXIMを指す
-            _apply_env("ibus", gtk_mod, xim=None if ibus_running else "fcitx")
+            _apply_env("ibus", gtk_mod, xim=None if ibus_running else "fcitx", keep=keep)
             if ibus_running:
                 backend = "fcitx5(via ibus)"
             else:
@@ -254,7 +340,7 @@ def setup_ime() -> str:
             return backend
         # ibus-daemon も、fcitx5のibusフロントエンドが作るアドレスファイルも無い
         # ＝ ibus経路では接続先が無い。fcitx5 のネイティブQtプラグインへ直接接続する。
-        _apply_env("fcitx", gtk_mod)
+        _apply_env("fcitx", gtk_mod, keep=keep)
         print(
             "[IME] 注意: ibusバスが見つからないため fcitx5 へ直接接続します。"
             "ネイティブプラグインがPySide6同梱Qtとバージョン不一致でロードできない環境では"
@@ -286,3 +372,11 @@ def setup_ime() -> str:
             os.environ["GTK_IM_MODULE"] = "fcitx"
             return "fcitx5(not running)"
         return "none"
+
+
+def setup_ime() -> str:
+    """IMEバックエンドを自動検出して環境変数を設定する（詳細は _setup_ime_impl）。
+    どの分岐で返っても、上書き後の値を必ず [IME-DEBUG] として出力する。"""
+    backend = _setup_ime_impl()
+    log_ime_env("setup_ime による上書き後")
+    return backend

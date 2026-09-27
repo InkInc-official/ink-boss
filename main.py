@@ -16,7 +16,7 @@ import sys
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # IME設定：すべてのimport・QApplication生成より前に必須
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-from ime import setup_ime
+from ime import setup_ime, log_ime_env
 _ime_backend = setup_ime()
 print(f"[IME] backend={_ime_backend}", flush=True)
 
@@ -47,6 +47,7 @@ from updater import check_update, download_and_install, CURRENT_VERSION
 from electron_bridge import ElectronEngine
 
 # QApplication
+log_ime_env("Qt本体（QApplication生成直前。QtWebEngineProcessもこの環境を継承）")
 qt_app = QApplication.instance() or QApplication(sys.argv)
 icon_path = Path(__file__).parent / "frontend" / "public" / "icon.png"
 if icon_path.exists():

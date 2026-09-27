@@ -255,6 +255,11 @@ class ElectronEngine:
 
             env = os.environ.copy()
             env["INK_ELECTRON_PORT"] = "0"
+            try:
+                from ime import log_ime_env
+                log_ime_env("Electron子プロセスへ渡す環境変数", env)
+            except Exception:
+                pass
             cmd = [binary, str(ENGINE_DIR / "main.js")]
             if sys.platform.startswith("linux"):
                 cmd = [binary, "--no-sandbox", str(ENGINE_DIR / "main.js")]
