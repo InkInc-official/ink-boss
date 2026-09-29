@@ -398,6 +398,26 @@ def show_settings_dialog(config: dict, js_eval_fn):
     progress_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     ai_l.addWidget(progress_lbl)
 
+    # sudo権限が必要な自動インストールがバックグラウンドで失敗した場合、
+    # ユーザーが手元のターミナルで実行し直せるよう、コマンドをワンクリックで
+    # コピーできるボタンを出す（GUIからのsudo自動実行はTTYが無く原理的に
+    # 失敗するため、案内を分かりやすくするのが現実的な対策）。
+    copy_cmd_btn = QPushButton("インストールコマンドをコピー")
+    copy_cmd_btn.setStyleSheet(
+        "QPushButton{border-radius:6px;padding:4px 10px;font-size:11px;"
+        "border:1px solid rgba(255,200,100,0.4);color:rgba(255,200,100,0.9);background:transparent;}"
+        "QPushButton:hover{border:1px solid rgba(255,200,100,0.7);color:white;}"
+    )
+    copy_cmd_btn.setVisible(False)
+
+    def _copy_install_cmd():
+        QApplication.clipboard().setText(OLLAMA_INSTALL_CMD)
+        copy_cmd_btn.setText("コピーしました ✓")
+        QTimer.singleShot(2000, lambda: copy_cmd_btn.setText("インストールコマンドをコピー"))
+
+    copy_cmd_btn.clicked.connect(_copy_install_cmd)
+    ai_l.addWidget(copy_cmd_btn)
+
     install_signals = _InstallSignals(dialog)
 
     def refresh_ollama_status():
@@ -406,6 +426,7 @@ def show_settings_dialog(config: dict, js_eval_fn):
             ollama_status.setText("✓ Ollama インストール済み")
             ollama_status.setStyleSheet("color: rgba(100,255,150,0.7); font-size: 12px;")
             install_btn.setVisible(False)
+            copy_cmd_btn.setVisible(False)
         else:
             ollama_status.setText("✗ Ollamaが見つかりません")
             ollama_status.setStyleSheet("color: rgba(255,100,100,0.7); font-size: 12px;")
@@ -420,6 +441,11 @@ def show_settings_dialog(config: dict, js_eval_fn):
         if ok:
             # 未導入のため出していたモデルDLの案内を消し、DLボタンを有効な状態に戻す
             model_msg.setText("")
+            copy_cmd_btn.setVisible(False)
+        else:
+            # 自動インストールが失敗した場合のみ表示。GUIからのsudo自動実行は
+            # TTYが無いため原理的に成功しない環境が多く、手動実行への案内が本筋。
+            copy_cmd_btn.setVisible(True)
         refresh_default_row()
 
     install_signals.done.connect(on_install_done)
