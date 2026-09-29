@@ -22,7 +22,7 @@
 set -e
 
 APP_NAME="ink-boss"
-VERSION="1.0.2"
+VERSION="1.0.3"
 ARCH="amd64"
 BUILD_DIR="$HOME/build-deb"
 PKG_DIR="$BUILD_DIR/${APP_NAME}_${VERSION}_${ARCH}"
