@@ -2,6 +2,8 @@
 
 > All your services. One place. No compromises.
 
+[日本語](#ink-boss) | [English](#ink-boss-english)
+
 **Ink Inc.** が開発する、レシピレスのマルチサービス一元化デスクトップアプリ。
 
 [![license](https://img.shields.io/badge/license-MIT-green)](#license)
@@ -154,3 +156,151 @@ AIによる創造と人によるケアを両立するIRIAMライバー事務所�
 
 - [Ink Timodal](https://github.com/InkInc-official/ink-timodal) — ADHDクリエイターのための完全ローカル自己観察ツール
 - [Ink Calendar Lite](https://github.com/BlackHeart0731/ink-calendar-lite) — サーバー不要のイベント予定共有ツール
+
+
+
+## Ink Boss (English)
+
+> All your services. One place. No compromises.
+
+A recipe-less, multi-service desktop app developed by **Ink Inc.**
+
+[![license](https://img.shields.io/badge/license-MIT-green)](#license)
+[![platform](https://img.shields.io/badge/platform-Linux-blue)](#)
+[![built with](https://img.shields.io/badge/built%20with-PySide6%20%2B%20Electron-41cd52)](#)
+
+> AI Creation, Human Care. The Future Drawn Together. — Ink Inc.
+
+---
+
+### Why we built this
+
+Multi-service "everything in one app" tools like Ferdium, Rambox, and Station already exist, but a single browser engine can't satisfy every service's login requirements. In practice we ran into these constraints:
+
+- **Google account sign-in**: since 2021, Google's official policy blocks OAuth from "embedded browsers," which structurally blocks Electron (bundled Chromium) apps.
+- **Email/password auth (e.g. Discord)**: depending on when QtWebEngine shuts down, session data (LocalStorage) can fail to flush to disk, losing the login state. Electron's session handling is more reliable for these cases.
+
+So Ink Boss uses a **dual-engine design**: you choose QtWebEngine or Electron per service, and each engine covers the other's weak spot.
+
+---
+
+### Dual-engine design
+
+| Engine | Best for | Implementation |
+|---|---|---|
+| **Qt** (QtWebEngine) | Services requiring Google OAuth (Gmail, Claude, etc.) | PySide6's QWebEngineView embedded directly in the app |
+| **Electron** | Services with email/password auth that need long-lived sessions (Discord, etc.) | A persistent Electron helper process controlled over HTTP, with its window tracking the main Ink Boss window |
+
+- When you add a service, Ink Boss auto-suggests Qt for Google-domain URLs and Electron for everything else (you can switch manually).
+- Each service gets an isolated profile (cookies, LocalStorage) — sessions never leak between accounts.
+
+---
+
+### Concept
+
+Existing "everything in one app" tools accumulate a "recipe" per service and eventually stall or shut down under that maintenance burden. Ink Boss removes that structure entirely.
+
+**Just register a URL. No recipes needed.**
+
+- **Recipe-less** — pin any web service to the sidebar just by adding its URL
+- **Per-service engine choice** — pick Qt or Electron per service to match its auth method
+- **Session isolation** — each service gets its own profile; cookies and login state never mix
+- **Lazy loading / hibernation** — unused services sleep to save memory
+- **Local-first** — login info and browsing data are never sent anywhere external
+
+---
+
+### Tech stack
+
+| Layer | Technology |
+|---|---|
+| Desktop shell | PySide6 (Qt for Python) + [pywebview](https://pywebview.flowrl.com/) (`gui="qt"`) |
+| Frontend | React + TypeScript + Vite (`frontend/`) |
+| Rendering engine (Qt side) | QtWebEngine (Chromium-based) |
+| Rendering engine (Electron side) | Persistent Electron helper (`electron-engine/`) controlled via HTTP API |
+| Python ↔ Frontend | pywebview's `js_api` ([api.py](api.py)) |
+| Python ↔ Electron | Local HTTP ([electron_bridge.py](electron_bridge.py)) |
+
+---
+
+### Setup
+
+**Requirements**
+
+- Python 3.12+
+- PySide6 (with QtWebEngine)
+- Node.js (for the Electron helper)
+
+```bash
+pip install -r requirements.txt
+cd electron-engine && npm install && cd ..
+```
+
+If you want to build the frontend yourself (if `frontend/dist` exists, it's served in preference to a dev server):
+
+```bash
+npm install --prefix frontend
+npm run build --prefix frontend
+```
+
+**Run**
+
+```bash
+python3 main.py
+```
+
+To run the frontend against the Vite dev server during development:
+
+```bash
+npm run dev --prefix frontend &
+python3 main.py
+```
+
+Config and sessions are stored at:
+
+- `~/.config/ink-boss/config.json`
+- `~/.config/ink-boss/sessions/` (Qt engine profiles)
+- `~/.config/ink-boss/electron-userdata/` (Electron engine profiles)
+
+---
+
+### Roadmap
+
+- [ ] Multiple tabs within a single service
+- [ ] Folder grouping for services (drag & drop reordering)
+- [ ] Windows / macOS support
+- [ ] Official integration of Aide (the sidebar AI assistant)
+- [ ] Automated build of distribution packages (.deb / AppImage)
+
+---
+
+### Contributing
+
+Issues and pull requests are welcome. We'd especially love help with:
+
+- Windows / macOS support
+- Per-service unread/badge notifications
+- UI/UX improvements
+
+---
+
+### License
+
+MIT License — © 2026 Kuroi Hatsuto / Ink Inc.
+
+---
+
+### About Ink Inc.
+
+**AI Creation, Human Care. The Future Drawn Together.**
+
+An IRIAM talent agency that combines AI-driven creation with human care. We actively open-source our in-house tools to show what's possible even on a shoestring budget.
+
+- Web: https://inkinc-hp.vercel.app/
+- X: https://x.com/InkInc_Info
+- GitHub: https://github.com/InkInc-official
+
+**Related projects**
+
+- [Ink Timodal](https://github.com/InkInc-official/ink-timodal) — a fully local self-observation tool for ADHD creators
+- [Ink Calendar Lite](https://github.com/BlackHeart0731/ink-calendar-lite) — a serverless event-schedule sharing tool
