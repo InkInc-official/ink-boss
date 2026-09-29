@@ -684,6 +684,18 @@ class InkBossAPI:
         self._bridge.show_view_signal.emit(sid, x, y, ww, h)
 
     def get_page_text(self, service_id):
+        # Qt側はloadFinished/urlChanged時にPython側から能動的に
+        # runJavaScriptしてpage_text_cacheへ溜めている（bridge.py参照）が、
+        # Electron側には同等の仕組みがなかったため、Electronホストの
+        # サービス（Ecosia等）ではInk Aideがページ内容を取得できず、
+        # 常に「具体的にどのページについて要約すべきか教えてください」
+        # という空振りの応答になっていた（実機報告で発見）。
+        # electron-engine/main.jsの/pageTextエンドポイント（その場で
+        # document.body.innerTextを取得）を呼び出して同じ内容を渡す。
+        if self._service_engine(service_id) == "electron":
+            if self._electron and self._electron.is_available():
+                return self._electron.get_page_text(service_id)
+            return ""
         return self._bridge.page_text_cache.get(service_id, "")
 
     def drag_window(self):

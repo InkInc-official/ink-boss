@@ -107,11 +107,10 @@ def _get_active_window_id() -> int | None:
 
 def _descendant_pids(root_pid: int) -> set[int]:
     """root_pid自身と、その子孫プロセスのPID集合を返す（Linux /proc 使用、
-    サブプロセス起動なし）。Electronは node_modules/.bin/electron という
-    起動スクリプトの子プロセスとして実際のブラウザ本体プロセスを起動する
-    ため、electron_engine が保持するPID（起動スクリプト側）単体では、
-    実際にウィンドウを所有する子プロセスのPIDと一致しない。プロセス
-    ツリー全体を辿って初めて正しく判定できる。"""
+    サブプロセス起動なし）。Electron(Chromium)はマルチプロセス構成のため、
+    electron_engine が保持するPID（メインプロセス）単体では、実際に
+    レンダリングを行うrenderer/gpu-process/zygote/utility等の子プロセスの
+    PIDと一致しない。プロセスツリー全体を辿って初めて正しく判定できる。"""
     children_map: dict[int, list[int]] = {}
     try:
         for entry in os.listdir("/proc"):

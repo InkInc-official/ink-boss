@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
@@ -55,35 +56,76 @@ def _http_json(method: str, url: str, body: dict | None = None, timeout: float =
         return json.loads(raw) if raw else {}
 
 
+def _electron_dist_binary(pkg_dir: Path) -> Path | None:
+    """electron npmパッケージ本体のディレクトリ(pkg_dir、例:
+    node_modules/electron/)から、Node.jsのインストールやPATH設定に一切
+    依存しない、実行可能なネイティブバイナリ本体を直接特定する。
+
+    node_modules/.bin/electron は `#!/usr/bin/env node` で始まる
+    ラッパースクリプトで、実行時にPATH上に node コマンドが存在することを
+    前提とする。GUIランチャー(.desktopファイル)経由の起動は、nvm等が
+    .bashrc内で行うようなログインシェル限定のPATH設定を経由しないため、
+    nodeがそのような対話シェル限定の方法でしか入っていない環境では
+    「env: 'node': そのようなファイルやディレクトリはありません」で
+    Electronの起動自体が失敗する（創作PCの実機報告で発見。一般ユーザーが
+    Node.js自体を持たない、あるいはnvmのような対話シェル限定の方法で
+    入れている場合に常に発生しうる、配布上の重大なバグだった）。
+
+    electronパッケージ自身がpostinstallで生成するpath.txt（dist/配下の
+    実行ファイル名。Linuxでは"electron"、Windowsでは"electron.exe"、
+    macOSでは"Electron.app/Contents/MacOS/Electron"）を読み、そこから
+    直接ネイティブバイナリ本体を指す。これはNode.js側の
+    require('electron')が返すパスと全く同じ仕組みであり、Node.jsの
+    インストールを一切必要としない。"""
+    path_txt = pkg_dir / "path.txt"
+    rel = ""
+    try:
+        rel = path_txt.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    candidates = []
+    if rel:
+        candidates.append(pkg_dir / "dist" / rel)
+    # path.txtが読めない/内容が想定外な場合の保険的フォールバック
+    candidates.append(pkg_dir / "dist" / "electron")
+    candidates.append(pkg_dir / "dist" / "electron.exe")
+    for c in candidates:
+        if c.is_file() and os.access(c, os.X_OK):
+            return c
+    return None
+
+
 def _electron_looks_installed(bin_path: Path) -> bool:
-    if not bin_path.exists():
-        return False
     pkg_dir = bin_path.parent.parent / "electron"
-    dist = pkg_dir / "dist"
-    if dist.is_dir():
-        for name in ("electron", "electron.exe"):
-            if (dist / name).exists():
-                return True
-        try:
-            return any(dist.iterdir())
-        except OSError:
-            return False
+    if _electron_dist_binary(pkg_dir) is not None:
+        return True
     return bin_path.is_file() and os.access(bin_path, os.X_OK)
 
 
 def resolve_electron_binary() -> str | None:
-    candidates = [
+    """起動対象のElectron実行ファイルを解決する。
+
+    候補ごとに、まず_electron_dist_binary()でNode.js不要のネイティブ
+    バイナリ本体を探し、見つかればそちらを優先して返す
+    （node_modules/.bin/electron のラッパースクリプト経由にしない）。
+    見つからない場合のみ、従来通り.bin/electron自体を返す
+    （nodeがPATH上にある環境であれば、それでも動作はする）。"""
+    bin_candidates = [
         ENGINE_DIR / "node_modules" / ".bin" / "electron",
     ]
     which = shutil.which("electron")
     if which:
-        candidates.append(Path(which))
-    candidates.append(
+        bin_candidates.append(Path(which))
+    bin_candidates.append(
         Path.home() / "Applications" / "largs-hub-0.1.30" / "node_modules" / ".bin" / "electron"
     )
-    for c in candidates:
-        if _electron_looks_installed(c):
-            return str(c)
+    for bin_path in bin_candidates:
+        pkg_dir = bin_path.parent.parent / "electron"
+        real = _electron_dist_binary(pkg_dir)
+        if real is not None:
+            return str(real)
+        if bin_path.is_file() and os.access(bin_path, os.X_OK):
+            return str(bin_path)
     return None
 
 
@@ -385,13 +427,13 @@ class ElectronEngine:
             # 【デバッグ専用・調査完了後に削除】.debパッケージを複数環境
             # （事務所PC・創作PC等）へ配布した際のGTK/fcitx5構成差を比較する
             # ための静的診断。起動のたびに一度、ime-debug.logへ追記する。
-            # binary（node_modules/.bin/electron）はcli.jsへのシンボリック
-            # リンクでldd対象にならないため、実際のELF本体
-            # （node_modules/electron/dist/electron）を別途解決して渡す。
+            # resolve_electron_binary()がNode.js不要のネイティブバイナリ
+            # 本体を優先して返すようになったため、binaryはそのままldd対象
+            # として使える（.bin/electronのシンボリックリンク経由だった
+            # 頃はcli.js止まりでlddできず、別途dist/electronを解決していた）。
             try:
                 from ime import log_gtk_diagnostics
-                real_elf = ENGINE_DIR / "node_modules" / "electron" / "dist" / "electron"
-                log_gtk_diagnostics(str(real_elf) if real_elf.exists() else binary, env)
+                log_gtk_diagnostics(binary, env)
             except Exception:
                 pass
             cmd = [binary, str(ENGINE_DIR / "main.js")]
@@ -646,3 +688,22 @@ class ElectronEngine:
 
     def set_always_on_top(self, sid: str, on_top: bool) -> dict:
         return self._post("/setAlwaysOnTop", {"sid": sid, "onTop": on_top})
+
+    def get_page_text(self, sid: str, timeout: float = 5.0) -> str:
+        """Ink Aide（AIによるページ要約）用に、Electronでホストされている
+        サービスの実際のページ本文（document.body.innerText）を取得する。
+
+        Qt側（bridge.py の page_text_cache）はloadFinished/urlChanged時に
+        Python側から能動的にrunJavaScriptしてキャッシュしているが、
+        Electron側には同等の仕組みがなかったため、Ink Aideが
+        Electronホストのサービス（Ecosia等）ではページ内容を一切取得
+        できず「具体的にどのページについて要約すべきか教えてください」
+        という空振りの応答になっていた（実機報告で発見）。
+        main.js側の/pageTextエンドポイント（該当sidのwebContentsへ
+        executeJavaScriptする）を呼び出すことで、Qt側と同じ内容
+        （ページの可視テキスト全文）をPython側へ渡せるようにする。"""
+        sid_q = urllib.parse.quote(sid, safe="")
+        r = self._get(f"/pageText?sid={sid_q}", timeout=timeout)
+        if r.get("ok"):
+            return str(r.get("text") or "")
+        return ""

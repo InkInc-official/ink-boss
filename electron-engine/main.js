@@ -457,6 +457,30 @@ async function handleRequest(req, res) {
       });
       return sendJson(res, 200, { ok: true, ids: [...hibernated], awake, audible });
     }
+    if (req.method === "GET" && route === "/pageText") {
+      // Ink Aide（AIによるページ要約）用。Qt側（bridge.pyのpage_text_cache）
+      // はloadFinished/urlChanged時にPython側からrunJavaScriptして能動的に
+      // キャッシュしているが、Electron側には同等の仕組みがなかったため、
+      // Electronホストのサービス（Ecosia等）ではInk Aideがページ内容を
+      // 一切取得できていなかった（実機報告で発見）。ここでは対象sidの
+      // webContentsへその場でexecuteJavaScriptし、document.body.innerText
+      // を返すことで、Qt側と同じ「ページの可視テキスト全文」を渡す。
+      const sid = u.searchParams.get("sid");
+      if (!sid) return sendJson(res, 400, { ok: false, error: "sid_required" });
+      const win = windows.get(sid);
+      if (!win || win.isDestroyed()) return sendJson(res, 404, { ok: false, error: "not_found" });
+      try {
+        const text = await win.webContents.executeJavaScript(
+          "document.body ? document.body.innerText : ''"
+        );
+        return sendJson(res, 200, { ok: true, text: String(text || "") });
+      } catch (err) {
+        return sendJson(res, 500, {
+          ok: false,
+          error: String(err && err.message ? err.message : err),
+        });
+      }
+    }
     if (req.method === "POST" && route === "/create") {
       const { sid, url: svcUrl, muted, loadNow } = body;
       if (!sid) return sendJson(res, 400, { ok: false, error: "sid_required" });
