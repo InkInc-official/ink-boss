@@ -52,6 +52,7 @@ def show_service_context_menu(
     create_view_fn,
     remove_view_fn=None,
     navigate_view_fn=None,
+    reload_view_fn=None,
     active_menu_holder: list | None = None,
     dialog_wrapper=None,
 ) -> None:
@@ -99,6 +100,15 @@ def show_service_context_menu(
     menu.addSeparator()
 
     toggle_a = menu.addAction("復帰" if is_hib else "休止")
+    # 「今のページを更新」= 表示中のページをそのまま更新（ブラウザのF5相当）。
+    # 休止中は更新対象が無い（about:blankのまま）ので非活性にする。
+    reload_a = menu.addAction("今のページを更新")
+    reload_a.setEnabled(not is_hib)
+    # 「サービスを更新」= 登録時のURL（サービスの入り口）まで戻す。
+    # 休止中でも「最後にいたページ」ではなく「入り口」に戻したい、という
+    # 明確な意図の操作なので、休止中でも選べるようにしておく
+    # （navigate_view_fn自体が内部でwake相当の処理を行うため安全）。
+    reset_a = menu.addAction("サービスを更新")
     menu.addSeparator()
     delete_a = menu.addAction("削除")
 
@@ -118,6 +128,19 @@ def show_service_context_menu(
         wrap(lambda: _do_change_url(sid, (svc or {}).get("url", ""), config, js_eval_fn, navigate_view_fn))
     elif action == switch_a:
         wrap(lambda: _do_toggle_engine(sid, name, config, js_eval_fn))
+    elif action == reload_a:
+        if reload_view_fn:
+            reload_view_fn(sid)
+        js_eval_fn(
+            f"window.dispatchEvent(new CustomEvent('service-reloaded',{{detail:'{sid}'}}));"
+        )
+    elif action == reset_a:
+        home_url = (svc or {}).get("url", "")
+        if home_url and navigate_view_fn:
+            navigate_view_fn(sid, home_url)
+        js_eval_fn(
+            f"window.dispatchEvent(new CustomEvent('service-reset',{{detail:'{sid}'}}));"
+        )
     elif action == delete_a:
         # 重要: hibernate ではなく remove
         rm = remove_view_fn or hibernate_view_fn

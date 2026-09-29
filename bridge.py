@@ -763,6 +763,22 @@ class ViewBridge(QObject):
             else:
                 self._wake_view(s, new_url)
 
+        def _reload_any(s: str) -> None:
+            # Qt / Electron どちらでも、現在のページをそのままリロードする
+            # （休止中は_reload_view/el.reloadとも何もしない設計のため、
+            # 呼び出し前にcontext_menu.py側でメニュー項目自体を非活性にしている）
+            svc = next((x for x in self.config.get("services", []) if x["id"] == s), None)
+            eng = ((svc or {}).get("engine") or "qt").lower()
+            if eng in ("electron", "e"):
+                el = getattr(self, "electron", None)
+                if el is not None and el.is_available():
+                    try:
+                        el.reload(s)
+                    except Exception as e:
+                        print(f"[bridge] electron reload {s}: {e}", flush=True)
+            else:
+                self._reload_view(s)
+
         show_service_context_menu(
             sid=sid, name=name, x=x, y=y,
             is_hib=is_hib, groups_json=groups_json,
@@ -772,6 +788,7 @@ class ViewBridge(QObject):
             create_view_fn=self._create_view,
             remove_view_fn=_destroy_any,
             navigate_view_fn=_navigate_any,
+            reload_view_fn=_reload_any,
             active_menu_holder=self._active_menu_holder,
             dialog_wrapper=self._show_dialog_with_electron_hidden,
         )
