@@ -8,6 +8,7 @@ B1: リサイズ時に Electron オーバーレイも追従。
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -17,7 +18,7 @@ from PySide6.QtGui import QIcon, QPalette, QColor
 from PySide6.QtCore import Qt
 
 from config import SIDEBAR_W, URLBAR_H
-from bridge import set_win_id
+from bridge import set_win_id, find_own_window_id
 from sysenv import get_clean_subprocess_env
 
 
@@ -78,12 +79,11 @@ def on_shown(window, bridge, icon_path: Path, aide_width_getter) -> None:
 
         time.sleep(0.4)
         clean_env = get_clean_subprocess_env()
-        result = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True, env=clean_env)
-        win_id = None
-        for line in result.stdout.splitlines():
-            if "Ink Boss" in line:
-                win_id = line.split()[0]
-                break
+        # タイトル一致だけでなく自プロセスのPID一致も要求する
+        # （find_own_window_idのdocstring参照。無関係な外部アプリの
+        # ウィンドウを誤って自分のものとして掴む実害のあるバグが
+        # あったため）。
+        win_id = find_own_window_id("Ink Boss")
         if not win_id:
             return
         set_win_id(win_id)

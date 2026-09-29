@@ -706,7 +706,7 @@ class InkBossAPI:
         """A1: TopBar ドラッグ。B1: ドラッグ中も Electron を追従。"""
         import subprocess
         import time
-        from bridge import get_win_id
+        from bridge import get_win_id, find_own_window_id
 
         if self._dragging:
             return
@@ -719,11 +719,11 @@ class InkBossAPI:
 
         win_id = get_win_id()
         if not win_id:
-            result = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True, env=clean_env)
-            for line in result.stdout.splitlines():
-                if "Ink Boss" in line:
-                    win_id = line.split()[0]
-                    break
+            # タイトル一致だけでなく自プロセスのPID一致も要求する
+            # （bridge.find_own_window_idのdocstring参照。無関係な
+            # 外部アプリのウィンドウを誤ってドラッグ対象として掴む
+            # 実害のあるバグがあったため）。
+            win_id = find_own_window_id("Ink Boss")
         if not win_id:
             return
 
