@@ -124,8 +124,9 @@ Architecture: ${ARCH}
 Depends: libnss3, libatk-bridge2.0-0, libgtk-3-0, libxss1, libgbm1, wmctrl, xdotool, x11-utils
 Recommends: fcitx5, fcitx5-frontend-gtk3
 Maintainer: 黒井葉跡 <inkinc.official@gmail.com>
-Description: Ink Boss - Ink Inc. 配信特化PCワークスペース
- Ink Inc.所属ライバー向けの配信特化PCワークスペースツール。
+Description: Ink Boss - レシピレスのマルチサービス一元化デスクトップアプリ
+ Ink Inc.が開発する、複数のWebサービスを1つのウィンドウにまとめる
+ デスクトップアプリ。OSSとして公開。
  AI Creation, Human Care. The Future Drawn Together.
 EOF
 
