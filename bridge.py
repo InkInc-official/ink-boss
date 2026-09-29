@@ -24,6 +24,7 @@ from dialogs.settings     import show_settings_dialog
 from dialogs.add_service  import show_add_service_dialog
 from dialogs.add_group    import show_add_group_dialog
 from dialogs.context_menu import show_service_context_menu, show_group_context_menu
+from sysenv import get_clean_subprocess_env
 
 Q = Qt.ConnectionType.QueuedConnection
 
@@ -628,10 +629,11 @@ class ViewBridge(QObject):
             import subprocess
             def _force_focus(wid_hex):
                 import time as _t
+                clean_env = get_clean_subprocess_env()
                 _t.sleep(0.2)
-                subprocess.run(["wmctrl", "-ia", wid_hex], check=False, capture_output=True)
+                subprocess.run(["wmctrl", "-ia", wid_hex], check=False, capture_output=True, env=clean_env)
                 _t.sleep(0.1)
-                subprocess.run(["fcitx5-remote", "-o"], check=False, capture_output=True)
+                subprocess.run(["fcitx5-remote", "-o"], check=False, capture_output=True, env=clean_env)
                 print(f"[TIMING2] {time.time():.3f} _show_view({sid}): _force_focus thread done (wmctrl+fcitx5-remote)", flush=True)
             threading.Thread(target=_force_focus, args=(wid,), daemon=True).start()
         self.active_id = sid

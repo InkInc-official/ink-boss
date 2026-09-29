@@ -7,6 +7,8 @@ import socket
 import threading
 import subprocess
 
+from sysenv import get_clean_subprocess_env
+
 os.environ["QT_IM_MODULE"] = "fcitx5"
 os.environ["XMODIFIERS"] = "@im=fcitx5"
 os.environ["GTK_IM_MODULE"] = "fcitx5"
@@ -73,14 +75,15 @@ TITLEBAR_H = 39
 def xdo_reparent(child_wid: int, parent_wid: int, x: int, y: int):
     """X11 xdotoolでウィンドウを埋め込む"""
     try:
+        clean_env = get_clean_subprocess_env()
         subprocess.run(
             ["xdotool", "windowreparent",
              str(child_wid), str(parent_wid)],
-            check=False, capture_output=True)
+            check=False, capture_output=True, env=clean_env)
         subprocess.run(
             ["xdotool", "windowmove", "--sync",
              str(child_wid), str(x), str(y)],
-            check=False, capture_output=True)
+            check=False, capture_output=True, env=clean_env)
     except FileNotFoundError:
         pass  # xdotoolが無い場合はスキップ
 

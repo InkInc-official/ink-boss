@@ -44,7 +44,7 @@ from api    import InkBossAPI
 from window import on_shown, get_rect, get_screen_rect
 from electron_bridge import ElectronEngine
 from updater import check_update, download_and_install, CURRENT_VERSION
-from electron_bridge import ElectronEngine
+from sysenv import get_clean_subprocess_env
 
 # QApplication
 log_ime_env("Qt本体（QApplication生成直前。QtWebEngineProcessもこの環境を継承）")
@@ -97,6 +97,7 @@ def _get_active_window_id() -> int | None:
         result = subprocess.run(
             ["xdotool", "getactivewindow"],
             capture_output=True, text=True, timeout=0.3,
+            env=get_clean_subprocess_env(),
         )
         if result.returncode == 0:
             return int(result.stdout.strip())
@@ -155,6 +156,7 @@ def _get_own_window_ids(root_pids: set[int]) -> set[int]:
     try:
         result = subprocess.run(
             ["wmctrl", "-lp"], capture_output=True, text=True, timeout=0.3,
+            env=get_clean_subprocess_env(),
         )
         if result.returncode != 0:
             return set()

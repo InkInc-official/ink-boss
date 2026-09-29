@@ -15,6 +15,8 @@ import urllib.request
 from pathlib import Path
 from dotenv import load_dotenv
 
+from sysenv import get_clean_subprocess_env
+
 load_dotenv(Path(__file__).parent / ".env")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -150,10 +152,15 @@ def download_and_install(download_url: str, progress_callback=None) -> bool:
         print(f"[Updater] ダウンロード完了: {save_path}", flush=True)
 
         # インストール実行
+        # pkexec/dpkgはInk Boss自身のバイナリではない外部コマンドのため、
+        # PyInstaller由来のLD_LIBRARY_PATH等を取り除いた環境で呼ぶ
+        # （sysenv.py参照。pkexecはroot権限で別途起動されるが、環境の
+        # 継承経路を信用せず明示的にサニタイズしておく）。
         if platform.system() == "Linux":
             subprocess.Popen(
                 ["pkexec", "dpkg", "-i", str(save_path)],
                 start_new_session=True,
+                env=get_clean_subprocess_env(),
             )
         elif platform.system() == "Windows":
             subprocess.Popen(

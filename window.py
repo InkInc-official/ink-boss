@@ -18,6 +18,7 @@ from PySide6.QtCore import Qt
 
 from config import SIDEBAR_W, URLBAR_H
 from bridge import set_win_id
+from sysenv import get_clean_subprocess_env
 
 
 def get_rect(window, aide_w: int = 0) -> tuple[int, int, int, int]:
@@ -50,6 +51,7 @@ def get_screen_rect(window, aide_w: int = 0) -> tuple[int, int, int, int]:
                 capture_output=True,
                 text=True,
                 timeout=0.5,
+                env=get_clean_subprocess_env(),
             )
             for line in r.stdout.splitlines():
                 if line.startswith("X="):
@@ -75,7 +77,8 @@ def on_shown(window, bridge, icon_path: Path, aide_width_getter) -> None:
         import time
 
         time.sleep(0.4)
-        result = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True)
+        clean_env = get_clean_subprocess_env()
+        result = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True, env=clean_env)
         win_id = None
         for line in result.stdout.splitlines():
             if "Ink Boss" in line:
@@ -97,7 +100,7 @@ def on_shown(window, bridge, icon_path: Path, aide_width_getter) -> None:
                 "_MOTIF_WM_HINTS",
                 "0x2, 0x0, 0x0, 0x0, 0x0",
             ],
-            check=False,
+            check=False, env=clean_env,
         )
         print(f"titlebar hidden: {win_id}", flush=True)
 

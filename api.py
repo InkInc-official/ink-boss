@@ -16,6 +16,7 @@ import webview
 
 from config import save_config
 from bridge import js_eval
+from sysenv import get_clean_subprocess_env
 
 
 class InkBossAPI:
@@ -710,9 +711,15 @@ class InkBossAPI:
         if self._dragging:
             return
 
+        # wmctrl/xdotoolはInk Boss自身のバイナリではない外部コマンドのため、
+        # PyInstaller由来のLD_LIBRARY_PATH等を取り除いた環境で呼ぶ
+        # （sysenv.py参照）。ドラッグループは60fps相当で呼ばれるため、
+        # ループの外で一度だけ作って使い回す。
+        clean_env = get_clean_subprocess_env()
+
         win_id = get_win_id()
         if not win_id:
-            result = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True)
+            result = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True, env=clean_env)
             for line in result.stdout.splitlines():
                 if "Ink Boss" in line:
                     win_id = line.split()[0]
@@ -722,7 +729,8 @@ class InkBossAPI:
 
         def _get_mouse_pos():
             r = subprocess.run(
-                ["xdotool", "getmouselocation", "--shell"], capture_output=True, text=True
+                ["xdotool", "getmouselocation", "--shell"],
+                capture_output=True, text=True, env=clean_env,
             )
             x = y = 0
             for line in r.stdout.splitlines():
@@ -737,6 +745,7 @@ class InkBossAPI:
                 ["xdotool", "getwindowgeometry", "--shell", win_id],
                 capture_output=True,
                 text=True,
+                env=clean_env,
             )
             x = y = 0
             for line in r.stdout.splitlines():
@@ -760,7 +769,7 @@ class InkBossAPI:
                 if dx != 0 or dy != 0:
                     subprocess.run(
                         ["wmctrl", "-ir", win_id, "-e", f"0,{wx0 + dx},{wy0 + dy},-1,-1"],
-                        check=False,
+                        check=False, env=clean_env,
                     )
                     # pywebview window.x/y も更新（screen_rect 用）
                     try:
@@ -821,10 +830,12 @@ class InkBossAPI:
         win_id = get_win_id()
         if not win_id:
             return
+        clean_env = get_clean_subprocess_env()
         pos = subprocess.run(
             ["xdotool", "getwindowgeometry", "--shell", win_id],
             capture_output=True,
             text=True,
+            env=clean_env,
         )
         x = y = 0
         for line in pos.stdout.splitlines():
@@ -834,6 +845,6 @@ class InkBossAPI:
                 y = int(line.split("=")[1])
         subprocess.run(
             ["wmctrl", "-ir", win_id, "-e", f"0,{x + int(dx)},{y + int(dy)},-1,-1"],
-            check=False,
+            check=False, env=clean_env,
         )
         self._sync_overlay_from_win_pos(x + int(dx), y + int(dy))

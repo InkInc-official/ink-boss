@@ -19,6 +19,8 @@ import subprocess
 import shutil
 from pathlib import Path
 
+from sysenv import get_clean_subprocess_env
+
 
 # [IME-DEBUG] ログで出す環境変数。子プロセス（Qt本体・Electron）が実際に受け取る値を
 # 「上書きした後」の状態で確認するためのもの（起動前の値だけでは、IMEが効かない原因が
@@ -291,11 +293,12 @@ def _setup_ime_impl() -> str:
         )
         return "fcitx"
 
+    _pgrep_env = get_clean_subprocess_env()
     fcitx5_running = (
-        subprocess.run(["pgrep", "-x", "fcitx5"], capture_output=True).returncode == 0
+        subprocess.run(["pgrep", "-x", "fcitx5"], capture_output=True, env=_pgrep_env).returncode == 0
     )
     ibus_running = (
-        subprocess.run(["pgrep", "-x", "ibus-daemon"], capture_output=True).returncode == 0
+        subprocess.run(["pgrep", "-x", "ibus-daemon"], capture_output=True, env=_pgrep_env).returncode == 0
     )
 
     ibus_bus_ok, ibus_bus_file = ibus_bus_alive()
@@ -402,7 +405,6 @@ def dump_ime_debug_info(sid: str, active_element: str = "", proc_diag: str = "")
     収集）を IME_DEBUG_LOG に追記する。main.jsでF12が押されたとき、
     electron_bridge.ElectronEngine.on_ime_debug_requested 経由で呼ばれる。"""
     import datetime
-    import os
     import subprocess as sp
 
     lines = [f"===== {datetime.datetime.now().isoformat()} sid={sid} ====="]
@@ -413,16 +415,13 @@ def dump_ime_debug_info(sid: str, active_element: str = "", proc_diag: str = "")
         lines.append(proc_diag)
 
     try:
-        # PyInstaller(--onedir)でパッケージされた実行ファイルはブートローダーが
-        # LD_LIBRARY_PATHに同梱の_internalディレクトリ（古いバージョンの
-        # libdbus-1.so.3等を含む）を追加してから起動する。この環境をそのまま
-        # 子プロセスに継承させると、システムのdbus-sendが誤って同梱ライブラリを
-        # ロードしようとして次のようなバージョン不一致エラーで失敗する:
+        # dbus-sendはInk Boss自身のバイナリではない外部コマンドのため、
+        # get_clean_subprocess_env()でPyInstaller由来のLD_LIBRARY_PATH等を
+        # 取り除いた環境で実行する（詳細経緯はsysenv.py参照。当初は
+        # このdbus-sendのバージョン不一致エラーで発見したバグだった:
         #   dbus-send: .../libdbus-1.so.3: version `LIBDBUS_PRIVATE_1.16.2' not found
-        # （創作PCの実機検証で発見。Ink Boss本体の動作には影響しないため、
-        # この診断用サブプロセス呼び出しに限定してLD_LIBRARY_PATHを取り除く。）
-        debug_env = os.environ.copy()
-        debug_env.pop("LD_LIBRARY_PATH", None)
+        # ）。
+        debug_env = get_clean_subprocess_env()
         result = sp.run(
             [
                 "dbus-send", "--session", "--print-reply",
@@ -476,10 +475,10 @@ def log_gtk_diagnostics(electron_binary: str, electron_env: dict | None = None) 
     Ink Boss本体（Qt側）自身のプロセス環境でlddを実行すると、PyInstallerの
     LD_LIBRARY_PATHをそのまま引き継いでしまい、実際にElectronが使う
     ライブラリとは異なる（サニタイズ前の）解決結果を表示してしまう
-    （electron_bridge.pyの_sanitize_env_for_electron参照）。ここでは
-    Electronに実際に渡る環境でlddを実行することで、診断結果と実際の
-    動作を一致させる。省略時は現在のプロセス環境を使う（開発時の
-    python3 main.py直接実行など、サニタイズ不要な場合向け）。"""
+    （electron_bridge.pyがsysenv.get_clean_subprocess_env()で作る環境
+    参照）。ここではElectronに実際に渡る環境でlddを実行することで、
+    診断結果と実際の動作を一致させる。省略時は現在のプロセス環境を使う
+    （開発時のpython3 main.py直接実行など、サニタイズ不要な場合向け）。"""
     import datetime
 
     lines = [f"===== {datetime.datetime.now().isoformat()} Electron起動時のGTK/fcitx5診断 ====="]
@@ -523,9 +522,13 @@ def log_gtk_diagnostics(electron_binary: str, electron_env: dict | None = None) 
     # 変わっており、環境によって実在するパッケージ名が異なるため）。
     # 実際に使われるファイルの所有パッケージを dpkg -S で逆引きすることで、
     # 事務所PC・創作PC間のパッケージ名/バージョン差をそのまま比較できる。
+    _dpkg_env = get_clean_subprocess_env()
+
     def _dpkg_owner_info(file_path: str) -> str:
         try:
-            r = subprocess.run(["dpkg", "-S", file_path], capture_output=True, text=True, timeout=5)
+            r = subprocess.run(
+                ["dpkg", "-S", file_path], capture_output=True, text=True, timeout=5, env=_dpkg_env,
+            )
             if r.returncode != 0 or not r.stdout.strip():
                 return f"(所有パッケージ不明: {file_path})"
             pkg = r.stdout.split(":")[0].strip()
@@ -537,7 +540,8 @@ def log_gtk_diagnostics(electron_binary: str, electron_env: dict | None = None) 
             # 入れないと区切り無しで連結されてしまう（実機で確認済み）ため、
             # 明示的に改行を入れて分割し、最初の1件のみを使う。
             vr = subprocess.run(
-                ["dpkg-query", "-W", "-f=${Version}\n", pkg], capture_output=True, text=True, timeout=5,
+                ["dpkg-query", "-W", "-f=${Version}\n", pkg],
+                capture_output=True, text=True, timeout=5, env=_dpkg_env,
             )
             versions = [v for v in vr.stdout.splitlines() if v.strip()]
             ver = versions[0] if versions else "(バージョン取得失敗)"

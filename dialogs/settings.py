@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, QObject, Signal
 from config import DIALOG_STYLE, save_config
 from updater import CURRENT_VERSION
+from sysenv import get_clean_subprocess_env
 
 # 非モーダル(.show())のダイアログはPython側の参照が切れるとGCされて
 # 消えてしまうため、開いている間はここで保持する。
@@ -103,12 +104,21 @@ def run_ollama_install(on_done) -> None:
             ))
             return
         try:
+            # curlはInk Boss自身のバイナリではない外部コマンドのため、
+            # PyInstaller由来のLD_LIBRARY_PATH等を取り除いた環境で呼ぶ
+            # （sysenv.py参照。創作PCの実機報告で発見:
+            #   curl: .../libssl.so.3: version `OPENSSL_3.2.0' not found
+            # 同梱の(異なるバージョンの)libssl.so.3をシステムのcurlが
+            # 誤ってロードしてしまい失敗していた。dbus-send・Electron本体
+            # に続き3回目の同じ構造のバグだったため、個別対応ではなく
+            # get_clean_subprocess_env()での共通対策に切り替えた）。
             # start_new_session: タイムアウト時に sh 側の子プロセスごと止められるようにする
             proc = subprocess.Popen(
                 ["bash", "-c", "set -o pipefail; " + OLLAMA_INSTALL_CMD],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 start_new_session=True,
+                env=get_clean_subprocess_env(),
             )
             try:
                 out, err = proc.communicate(timeout=OLLAMA_INSTALL_TIMEOUT_S)
@@ -161,9 +171,13 @@ def pull_ollama_model(model: str, on_progress=None, on_done=None) -> None:
                 on_done(False, OLLAMA_NOT_INSTALLED_MSG)
             return
         try:
+            # ollamaもInk Boss自身のバイナリではない外部コマンド
+            # （システムにインストールされたGo製バイナリ）のため、念のため
+            # 同じくサニタイズした環境で呼ぶ（sysenv.py参照）。
             proc = subprocess.Popen(
                 [ollama_bin, "pull", model],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                env=get_clean_subprocess_env(),
             )
             last = ""
             for line in proc.stdout:
