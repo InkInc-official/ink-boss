@@ -21,7 +21,9 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('frontend/dist', 'frontend/dist'), ('frontend/public', 'frontend/public')],
+    # VERSION: updater.pyのCURRENT_VERSIONがbuild_deb.shのVERSIONと
+    # 単一の情報源を共有するために同梱する（updater.pyのdocstring参照）。
+    datas=[('frontend/dist', 'frontend/dist'), ('frontend/public', 'frontend/public'), ('VERSION', '.')],
     # platformdirs: 直接は使っていないが、PyInstallerのpkg_resources
     # 用ランタイムフック(pyi_rth_pkgres)がsetuptools同梱のpkg_resources
     # を初期化する際に必要とする。hiddenimportsに無いとバンドルされず、

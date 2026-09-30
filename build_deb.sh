@@ -21,12 +21,17 @@
 
 set -e
 
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="ink-boss"
-VERSION="1.0.3"
+# バージョンはプロジェクトルートの VERSION ファイルを単一の情報源とする
+# （updater.py の CURRENT_VERSION も同じファイルを読む）。以前は
+# build_deb.sh の VERSION 変数と updater.py の CURRENT_VERSION を
+# それぞれ手動で上げる運用にしていたが、CURRENT_VERSION の更新を
+# 忘れて古いバージョン表示のままになる不具合が実際に起きたため統一した。
+VERSION="$(cat "$SRC_DIR/VERSION")"
 ARCH="amd64"
 BUILD_DIR="$HOME/build-deb"
 PKG_DIR="$BUILD_DIR/${APP_NAME}_${VERSION}_${ARCH}"
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Ink Boss DEBパッケージビルド v${VERSION}"

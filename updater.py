@@ -26,8 +26,39 @@ GITHUB_OWNER = "InkInc-official"
 GITHUB_REPO  = "ink-boss"
 GITHUB_PAT   = os.getenv("GITHUB_PAT", "")
 
-# 現在のバージョン（リリース時に更新する。build_deb.shのVERSIONと必ず揃えること）
-CURRENT_VERSION = "1.0.3"
+def _read_version() -> str:
+    """プロジェクトルートのVERSIONファイルを読む。build_deb.shのVERSION
+    変数もこの同じファイルを読むようにしており、単一の情報源にしている
+    （以前はbuild_deb.shのVERSIONとupdater.pyのCURRENT_VERSIONをそれぞれ
+    手動で上げる運用にしていたが、CURRENT_VERSIONの更新を忘れて古い
+    バージョン表示のままになる不具合が実際に起きたため統一した）。
+
+    PyInstaller(--onedir)でパッケージされた場合、datasで指定した
+    ファイルは実行ファイルと同じ階層ではなく_internal/配下に展開される
+    （実機のdist/ink-boss/_internal/で確認済み）ため、sys._MEIPASS
+    （--onedirでも_internal/を指す）を優先的に見る。それも無ければ
+    実行ファイル自身の隣、開発時（python3 main.py直接実行）は
+    このファイル自身の隣を見る。"""
+    candidates = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "VERSION")
+        candidates.append(Path(sys.executable).resolve().parent / "VERSION")
+    else:
+        candidates.append(Path(__file__).resolve().parent / "VERSION")
+    for c in candidates:
+        try:
+            v = c.read_text(encoding="utf-8").strip()
+            if v:
+                return v
+        except OSError:
+            continue
+    return "0.0.0"
+
+
+# 現在のバージョン（VERSIONファイルから読む。手動で書き換えない）
+CURRENT_VERSION = _read_version()
 
 # アセットの拡張子（OS別）。実際のファイル名は build_deb.sh の命名規則
 # （例: ink-boss_1.0.3_amd64.deb）によりバージョンごとに変わるため、
