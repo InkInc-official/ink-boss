@@ -26,14 +26,17 @@ GITHUB_OWNER = "InkInc-official"
 GITHUB_REPO  = "ink-boss"
 GITHUB_PAT   = os.getenv("GITHUB_PAT", "")
 
-# 現在のバージョン（リリース時に更新する）
-CURRENT_VERSION = "1.0.0"
+# 現在のバージョン（リリース時に更新する。build_deb.shのVERSIONと必ず揃えること）
+CURRENT_VERSION = "1.0.3"
 
-# アセット名（OS別）
-ASSET_NAME = {
-    "Linux":   "ink-boss.deb",
-    "Windows": "ink-boss-setup.exe",
-}.get(platform.system(), "ink-boss.deb")
+# アセットの拡張子（OS別）。実際のファイル名は build_deb.sh の命名規則
+# （例: ink-boss_1.0.3_amd64.deb）によりバージョンごとに変わるため、
+# 固定ファイル名での完全一致ではなく拡張子での判定に変更した
+# （実機で「ダウンロードURLが見つかりません」エラーを確認・修正）。
+ASSET_EXT = {
+    "Linux":   ".deb",
+    "Windows": ".exe",
+}.get(platform.system(), ".deb")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -99,10 +102,10 @@ def check_update() -> dict:
         return {"available": False, "latest_version": latest_version,
                 "download_url": None, "release_notes": ""}
 
-    # アセットのダウンロードURLを探す
+    # アセットのダウンロードURLを探す（バージョンごとにファイル名が変わるため拡張子で判定）
     download_url = None
     for asset in release.get("assets", []):
-        if asset["name"] == ASSET_NAME:
+        if asset.get("name", "").endswith(ASSET_EXT):
             download_url = asset["browser_download_url"]
             break
 
@@ -128,7 +131,9 @@ def download_and_install(download_url: str, progress_callback=None) -> bool:
     Returns:
         成功したかどうか
     """
-    save_path = Path.home() / "Downloads" / ASSET_NAME
+    # ファイル名はダウンロードURLの末尾から取る（バージョンごとに変わるため）
+    filename = download_url.rstrip("/").rsplit("/", 1)[-1] or f"ink-boss{ASSET_EXT}"
+    save_path = Path.home() / "Downloads" / filename
     headers = {}
     if GITHUB_PAT:
         headers["Authorization"] = f"Bearer {GITHUB_PAT}"
