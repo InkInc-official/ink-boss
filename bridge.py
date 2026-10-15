@@ -404,6 +404,10 @@ _dialog_raiser: _DialogRaiser | None = None
 
 
 def install_dialog_raiser(qt_app) -> None:
+    # Windowsのみ。Linuxは既存の前面化処理（wmctrl等）・日本語入力との干渉を
+    # 避けるため、Linuxでの確認が取れるまで有効にしない。
+    if sys.platform != "win32":
+        return
     global _dialog_raiser
     if _dialog_raiser is None:
         _dialog_raiser = _DialogRaiser(qt_app)
@@ -489,7 +493,8 @@ class ViewBridge(QObject):
         self._guard_timer = QTimer(self)
         self._guard_timer.setInterval(150)
         self._guard_timer.timeout.connect(self._guard_tick)
-        self._guard_timer.start()
+        if sys.platform == "win32":  # Linuxでは、確認が取れるまで動かさない
+            self._guard_timer.start()
 
     def _guard_tick(self) -> None:
         try:
@@ -906,8 +911,11 @@ class ViewBridge(QObject):
             #   GUIスレッドがHTTP応答待ちで止まっていると、お互いに待ち合って
             #   タイムアウトするまで（十数秒）操作不能になる。
             # そのため通信は背景スレッドで行い、GUIスレッドは待たない。
-            hide_thread = threading.Thread(target=electron.hide_all, daemon=True)
-            hide_thread.start()
+            if sys.platform == "win32":
+                hide_thread = threading.Thread(target=electron.hide_all, daemon=True)
+                hide_thread.start()
+            else:
+                electron.hide_all()  # Linuxは従来どおり同期処理
 
         def restore() -> None:
             if not (was_shown and prev_sid):
@@ -916,6 +924,12 @@ class ViewBridge(QObject):
             still_electron = svc is not None and (svc.get("engine") or "qt").lower() in ("electron", "e")
             still_current = self.active_id in (prev_sid, None)
             if not (still_electron and still_current):
+                return
+
+            if sys.platform != "win32":
+                # Linuxは従来どおり同期処理
+                if not electron.is_shown:
+                    electron.show(prev_sid, "", 0, 0, 0, 0)
                 return
 
             def _bg() -> None:

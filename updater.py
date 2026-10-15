@@ -191,6 +191,12 @@ def download_and_install(download_url: str, progress_callback=None) -> bool:
     save_dir.mkdir(parents=True, exist_ok=True)
     save_path = save_dir / filename
     part_path = save_dir / (filename + ".part")  # 途中で切れた不完全ファイルを実行しないため
+    try:
+        part_path.unlink()  # 前回の失敗で残った不完全ファイルは捨てる
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
     headers = {}
     if GITHUB_PAT:
         headers["Authorization"] = f"Bearer {GITHUB_PAT}"
