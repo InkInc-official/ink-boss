@@ -9,7 +9,6 @@ B1: リサイズ時に Electron オーバーレイも追従。
 from __future__ import annotations
 
 import os
-import subprocess
 import threading
 from pathlib import Path
 
@@ -17,9 +16,9 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon, QPalette, QColor
 from PySide6.QtCore import Qt
 
+import winctl
 from config import SIDEBAR_W, URLBAR_H
-from bridge import set_win_id, find_own_window_id
-from sysenv import get_clean_subprocess_env
+from bridge import set_win_id
 
 
 def get_rect(window, aide_w: int = 0) -> tuple[int, int, int, int]:
@@ -41,24 +40,16 @@ def get_screen_rect(window, aide_w: int = 0) -> tuple[int, int, int, int]:
     x, y, w, h = get_rect(window, aide_w)
     wx = int(getattr(window, "x", 0) or 0)
     wy = int(getattr(window, "y", 0) or 0)
-    # xdotool 実座標があれば優先（ドラッグ直後の pywebview 内部値が古いことがある）
+    # OS側の実座標があれば優先（ドラッグ直後の pywebview 内部値が古いことがある）。
+    # 取得できない環境では pywebview 内部値のまま（winctl.get_window_position が None）。
     try:
         from bridge import get_win_id
 
         wid = get_win_id()
         if wid:
-            r = subprocess.run(
-                ["xdotool", "getwindowgeometry", "--shell", wid],
-                capture_output=True,
-                text=True,
-                timeout=0.5,
-                env=get_clean_subprocess_env(),
-            )
-            for line in r.stdout.splitlines():
-                if line.startswith("X="):
-                    wx = int(line.split("=")[1])
-                elif line.startswith("Y="):
-                    wy = int(line.split("=")[1])
+            pos = winctl.get_window_position(wid, timeout=0.5)
+            if pos is not None:
+                wx, wy = pos
     except Exception:
         pass
     return wx + x, wy + y, w, h
@@ -78,30 +69,16 @@ def on_shown(window, bridge, icon_path: Path, aide_width_getter) -> None:
         import time
 
         time.sleep(0.4)
-        clean_env = get_clean_subprocess_env()
         # タイトル一致だけでなく自プロセスのPID一致も要求する
-        # （find_own_window_idのdocstring参照。無関係な外部アプリの
+        # （winctl.find_own_window_idのdocstring参照。無関係な外部アプリの
         # ウィンドウを誤って自分のものとして掴む実害のあるバグが
         # あったため）。
-        win_id = find_own_window_id("Ink Boss")
+        win_id = winctl.find_own_window_id("Ink Boss")
         if not win_id:
             return
         set_win_id(win_id)
-        # MOTIF: decorations off（frameless=True と二重でも害は少ない）
-        subprocess.run(
-            [
-                "xprop",
-                "-id",
-                win_id,
-                "-f",
-                "_MOTIF_WM_HINTS",
-                "32c",
-                "-set",
-                "_MOTIF_WM_HINTS",
-                "0x2, 0x0, 0x0, 0x0, 0x0",
-            ],
-            check=False, env=clean_env,
-        )
+        # OSのタイトルバーを消す（frameless=True と二重でも害は少ない）
+        winctl.remove_decorations(win_id)
         print(f"titlebar hidden: {win_id}", flush=True)
 
     threading.Thread(target=hide_titlebar, daemon=True).start()

@@ -1,7 +1,8 @@
 /**
  * Ink Boss — Electron Engine Helper (B1: follow overlay, no reparent)
  *
- * - Fixed userData under ~/.config/ink-boss/electron-userdata  → session persistence
+ * - Fixed userData under <config>/ink-boss/electron-userdata    → session persistence
+ *   (<config> = ~/.config on Linux, %APPDATA% on Windows)
  * - partition persist:inkboss-{sid}                             → multi-account
  * - show/hide + setBounds only                                 → no SetParent
  * - HTTP JSON on 127.0.0.1                                      → Python control
@@ -15,7 +16,12 @@ const fs = require("fs");
 const os = require("os");
 
 // MUST be before ready — stable path for Discord/token disk flush
-const USER_DATA = path.join(os.homedir(), ".config", "ink-boss", "electron-userdata");
+// 保存先の規則は Python 側 platform_paths.config_dir() と必ず揃えること:
+//   Linux: ~/.config/ink-boss   /   Windows: %APPDATA%\ink-boss
+const CONFIG_ROOT = process.platform === "win32"
+  ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "ink-boss")
+  : path.join(os.homedir(), ".config", "ink-boss");
+const USER_DATA = path.join(CONFIG_ROOT, "electron-userdata");
 fs.mkdirSync(USER_DATA, { recursive: true });
 app.setPath("userData", USER_DATA);
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sysenv import get_clean_subprocess_env
+from winctl import descendant_pids
 
 def _resolve_base_dir() -> Path:
     """electron-engine/ を探す基準ディレクトリ。
@@ -149,27 +150,8 @@ def _read_ppid(pid: int) -> int | None:
         return None
 
 
-def _descendant_pids(root_pid: int) -> set[int]:
-    """root_pid自身とその子孫プロセスのPID集合（main.py の同名関数と同じ考え方）。"""
-    children_map: dict[int, list[int]] = {}
-    try:
-        for entry in os.listdir("/proc"):
-            if not entry.isdigit():
-                continue
-            ppid = _read_ppid(int(entry))
-            if ppid is not None:
-                children_map.setdefault(ppid, []).append(int(entry))
-    except OSError:
-        return {root_pid}
-    result = {root_pid}
-    stack = [root_pid]
-    while stack:
-        p = stack.pop()
-        for c in children_map.get(p, []):
-            if c not in result:
-                result.add(c)
-                stack.append(c)
-    return result
+# 子孫PID探索は winctl に集約した（旧: ここと main.py に同じ関数が重複していた）。
+_descendant_pids = descendant_pids
 
 
 # 【デバッグ専用・調査完了後に削除】IME(fcitx5)不具合の切り分け用。
@@ -274,6 +256,11 @@ def cleanup_orphaned_electron_processes() -> None:
     ツリーごと終了させる。まだ生きている親を持つプロセス（＝今まさに
     動いている別のInk Bossインスタンス）は誤って巻き込まないよう、
     対象から除外する。"""
+    if not sys.platform.startswith("linux"):
+        # TODO(win): /proc・SIGTERM/SIGKILL前提のため現状はLinux専用。Windowsでは
+        #            Toolhelpスナップショットでの列挙とTerminateProcessで同等の
+        #            孤児掃除を実装する（手順(4)）。それまでは何もしない。
+        return
     marker = str(ENGINE_DIR / "main.js")
     try:
         pids = [int(e) for e in os.listdir("/proc") if e.isdigit()]

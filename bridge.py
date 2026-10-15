@@ -19,12 +19,12 @@ from PySide6.QtWebEngineCore import (
 from PySide6.QtWidgets import QMenu
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QRect, Qt, QUrl
 
+import winctl
 from config import SESSIONS_DIR, save_config
 from dialogs.settings     import show_settings_dialog
 from dialogs.add_service  import show_add_service_dialog
 from dialogs.add_group    import show_add_group_dialog
 from dialogs.context_menu import show_service_context_menu, show_group_context_menu
-from sysenv import get_clean_subprocess_env
 
 Q = Qt.ConnectionType.QueuedConnection
 
@@ -300,54 +300,8 @@ def get_win_id() -> str | None:
 
 
 def find_own_window_id(title_substr: str) -> str | None:
-    """`wmctrl -lp`の出力から、タイトルにtitle_substrを含み、かつ
-    実際に自プロセス(os.getpid())が所有するウィンドウのIDを返す。
-
-    以前はタイトルの部分一致だけ（`wmctrl -l`でtitle_substrを含む
-    最初の行を無条件採用）で判定しており、次の2パターンで無関係な
-    ウィンドウを「自分のウィンドウ」として誤って掴んでしまう実害の
-    あるバグがあった（いずれも実機で確認済み）:
-      1. Ink Bossを複数インスタンス同時起動した場合、後から起動した
-         方が先に起動していた別インスタンスのウィンドウを誤って掴む
-      2. 無関係な外部アプリ（例: 実Ecosiaブラウザ等）のウィンドウ
-         タイトルに、たまたまtitle_substrと同じ文字列が含まれていた
-         場合（例: ブラウザでInk Boss関連のページを開いている等）に、
-         そのアプリのウィンドウを誤って掴んでしまう。一度これが
-         起きると、以降そのウィンドウIDを使う全ての操作（IME用の
-         フォーカス強制、タイトルバードラッグでの移動）が、Ink Boss
-         自身ではなく無関係な外部アプリの方に対して実行され続ける
-         （実機で、コンテンツ領域に実Ecosiaブラウザが透けて見え、
-         ドラッグすると実Ecosiaブラウザが動く、という形で確認済み）。
-
-    自プロセス自身はサンドボックスされていないため_NET_WM_PIDは
-    常に正しいホスト側PIDを報告する（_get_own_window_ids/
-    main.pyの説明と同じ前提）。タイトル一致に加えてPID一致も
-    要求することで、上記どちらのケースも確実に排除できる。"""
-    import os
-    import subprocess
-    from sysenv import get_clean_subprocess_env
-
-    try:
-        result = subprocess.run(
-            ["wmctrl", "-lp"], capture_output=True, text=True,
-            env=get_clean_subprocess_env(), timeout=2.0,
-        )
-    except Exception:
-        return None
-    if result.returncode != 0:
-        return None
-    my_pid = os.getpid()
-    for line in result.stdout.splitlines():
-        parts = line.split(None, 3)
-        if len(parts) < 3:
-            continue
-        try:
-            win_pid = int(parts[2])
-        except ValueError:
-            continue
-        if win_pid == my_pid and title_substr in line:
-            return parts[0]
-    return None
+    """互換ラッパー。実体は winctl.find_own_window_id（docstringもそちら）。"""
+    return winctl.find_own_window_id(title_substr)
 
 
 class _CustomPage(QWebEnginePage):
@@ -674,18 +628,16 @@ class ViewBridge(QObject):
         view.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         for child in view.findChildren(type(view)):
             child.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-        # IME有効化：X11フォーカスをメインウィンドウに移す
+        # IME有効化：OSのフォーカスをメインウィンドウに移す（実体はwinctl）
         wid = get_win_id()
         if wid:
-            import subprocess
             def _force_focus(wid_hex):
                 import time as _t
-                clean_env = get_clean_subprocess_env()
                 _t.sleep(0.2)
-                subprocess.run(["wmctrl", "-ia", wid_hex], check=False, capture_output=True, env=clean_env)
+                winctl.activate_window(wid_hex)
                 _t.sleep(0.1)
-                subprocess.run(["fcitx5-remote", "-o"], check=False, capture_output=True, env=clean_env)
-                print(f"[TIMING2] {time.time():.3f} _show_view({sid}): _force_focus thread done (wmctrl+fcitx5-remote)", flush=True)
+                winctl.ime_enable()
+                print(f"[TIMING2] {time.time():.3f} _show_view({sid}): _force_focus thread done (activate_window+ime_enable)", flush=True)
             threading.Thread(target=_force_focus, args=(wid,), daemon=True).start()
         self.active_id = sid
         print(f"[TIMING2] {time.time():.3f} _show_view({sid}) SLOT EXIT, active_id={self.active_id}", flush=True)

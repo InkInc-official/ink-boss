@@ -23,7 +23,10 @@ print(f"[IME] backend={_ime_backend}", flush=True)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Chromiumフラグ（QApplication生成前に追加）
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_chromium_flags = ["--ozone-platform-hint=auto", "--enable-features=UseOzonePlatform"]
+_chromium_flags = (
+    ["--ozone-platform-hint=auto", "--enable-features=UseOzonePlatform"]
+    if sys.platform.startswith("linux") else []  # ozoneはLinux(X11/Wayland)専用
+)
 for _flag in _chromium_flags:
     if _flag not in sys.argv:
         sys.argv.append(_flag)
@@ -44,7 +47,7 @@ from api    import InkBossAPI
 from window import on_shown, get_rect, get_screen_rect
 from electron_bridge import ElectronEngine
 from updater import check_update, download_and_install, CURRENT_VERSION
-from sysenv import get_clean_subprocess_env
+import winctl
 
 # QApplication
 log_ime_env("Qt本体（QApplication生成直前。QtWebEngineProcessもこの環境を継承）")
@@ -81,101 +84,9 @@ def _set_aide_width(val: int) -> None:
     _aide_width = val
 
 
-def _get_active_window_id() -> int | None:
-    """現在OSがアクティブとみなしているウィンドウのX11ウィンドウIDを返す。
-    以前は getwindowpid でPIDを取得して比較していたが、Flatpak等でサンド
-    ボックスされたアプリ（例: Ecosia Browser）はPID namespace内の見かけの
-    PID（2, 3等、bwrapのコンテナ内PID）を _NET_WM_PID として報告するため、
-    ホスト側から見ると常に「あり得ない小さいPID」に見えてしまい、判定に
-    使えない（実機で確認済み：これは一時的なレースではなく恒久的な問題）。
-    ウィンドウID自体はサンドボックス下でも正しく採番されるため、
-    「アクティブウィンドウのID」対「自分たちの既知のウィンドウID集合」の
-    比較に切り替える（PID解決を経由しない）。
-    Qtメインスレッドをブロックしないよう短いタイムアウトで打ち切る。"""
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["xdotool", "getactivewindow"],
-            capture_output=True, text=True, timeout=0.3,
-            env=get_clean_subprocess_env(),
-        )
-        if result.returncode == 0:
-            return int(result.stdout.strip())
-    except Exception:
-        pass
-    return None
-
-
-def _descendant_pids(root_pid: int) -> set[int]:
-    """root_pid自身と、その子孫プロセスのPID集合を返す（Linux /proc 使用、
-    サブプロセス起動なし）。Electron(Chromium)はマルチプロセス構成のため、
-    electron_engine が保持するPID（メインプロセス）単体では、実際に
-    レンダリングを行うrenderer/gpu-process/zygote/utility等の子プロセスの
-    PIDと一致しない。プロセスツリー全体を辿って初めて正しく判定できる。"""
-    children_map: dict[int, list[int]] = {}
-    try:
-        for entry in os.listdir("/proc"):
-            if not entry.isdigit():
-                continue
-            pid = int(entry)
-            try:
-                with open(f"/proc/{pid}/stat", "r") as f:
-                    stat = f.read()
-                after = stat.rsplit(")", 1)[-1].split()
-                ppid = int(after[1])
-            except (OSError, IndexError, ValueError):
-                continue
-            children_map.setdefault(ppid, []).append(pid)
-    except OSError:
-        return {root_pid}
-
-    result = {root_pid}
-    stack = [root_pid]
-    while stack:
-        p = stack.pop()
-        for c in children_map.get(p, []):
-            if c not in result:
-                result.add(c)
-                stack.append(c)
-    return result
-
-
-def _get_own_window_ids(root_pids: set[int]) -> set[int]:
-    """root_pids（自分たち自身のQt本体プロセス・Electronヘルパー起動
-    スクリプトのPID）自身とその子孫プロセス全てが所有するウィンドウIDの
-    集合を返す。自分たち自身のプロセスはサンドボックスされていないため、
-    _NET_WM_PID は正しくホスト側PIDを報告する（wmctrl -lp が信頼できる）。
-    以前は対象PID単体に対して xdotool search --pid していたが、
-    Electronの起動スクリプト→実ブラウザ本体という親子関係を辿れず、
-    実際のウィンドウを見つけられない場合があった（実機で確認済み）。"""
-    all_descendants: set[int] = set()
-    for pid in root_pids:
-        all_descendants |= _descendant_pids(pid)
-
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["wmctrl", "-lp"], capture_output=True, text=True, timeout=0.3,
-            env=get_clean_subprocess_env(),
-        )
-        if result.returncode != 0:
-            return set()
-    except Exception:
-        return set()
-
-    own_ids: set[int] = set()
-    for line in result.stdout.splitlines():
-        parts = line.split(None, 3)
-        if len(parts) < 3:
-            continue
-        try:
-            win_id = int(parts[0], 16)
-            win_pid = int(parts[2])
-        except ValueError:
-            continue
-        if win_pid in all_descendants:
-            own_ids.add(win_id)
-    return own_ids
+# アクティブ窓の取得・自プロセス窓IDの収集・子孫PID探索は winctl に集約した
+# （旧 _get_active_window_id / _descendant_pids / _get_own_window_ids。
+# 判定の考え方は winctl のdocstring参照）。
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -365,7 +276,7 @@ def main():
         if not (electron_engine and electron_engine.is_available() and electron_engine.active_sid):
             print(f"[DIAG-FOCUS] {_ts:.3f} source={source} skipped: no active electron service", flush=True)
             return
-        active_id = _get_active_window_id()
+        active_id = winctl.get_active_window_id()
         if active_id is None:
             print(f"[DIAG-FOCUS] {_ts:.3f} source={source} active_window_id=None (undetermined) — not hiding", flush=True)
             return
@@ -373,7 +284,7 @@ def main():
         electron_pid = electron_engine.pid
         if electron_pid:
             root_pids.add(electron_pid)
-        own_ids = _get_own_window_ids(root_pids)
+        own_ids = winctl.get_own_window_ids(root_pids)
         if active_id in own_ids:
             print(f"[DIAG-FOCUS] {_ts:.3f} source={source} active_window_id={active_id} is our own window — not hiding", flush=True)
             return

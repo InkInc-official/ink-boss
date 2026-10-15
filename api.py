@@ -14,6 +14,7 @@ import uuid
 
 import webview
 
+import winctl
 from config import save_config
 from bridge import js_eval
 from sysenv import get_clean_subprocess_env
@@ -660,25 +661,14 @@ class InkBossAPI:
     def toggle_maximize(self):
         # 以前は toggle_fullscreen() を使っていたため、画面全体を覆って
         # 上部パネルや下部ドックまで隠れていた。
-        # ウィンドウマネージャの「最大化」(_NET_WM_STATE_MAXIMIZED) を
-        # 切り替えることで、パネル/ドックを避けた作業領域に収める。
-        import subprocess
+        # ウィンドウマネージャの「最大化」を切り替えることで、パネル/ドックを
+        # 避けた作業領域に収める（実体は winctl.toggle_maximize）。
         from bridge import get_win_id
 
         win_id = get_win_id()
-        if win_id:
-            try:
-                r = subprocess.run(
-                    ["wmctrl", "-ir", win_id, "-b",
-                     "toggle,maximized_vert,maximized_horz"],
-                    capture_output=True, timeout=2,
-                    env=get_clean_subprocess_env(),
-                )
-                if r.returncode == 0:
-                    return
-            except Exception as e:
-                print(f"[toggle_maximize] wmctrl: {e}", flush=True)
-        # wmctrl が使えない場合のみ従来動作にフォールバック
+        if win_id and winctl.toggle_maximize(win_id):
+            return
+        # OS側の最大化が使えない場合のみ従来動作にフォールバック
         if webview.windows:
             webview.windows[0].toggle_fullscreen()
 
@@ -789,59 +779,33 @@ class InkBossAPI:
 
     def drag_start(self):
         """A1: TopBar ドラッグ。B1: ドラッグ中も Electron を追従。"""
-        import subprocess
         import time
-        from bridge import get_win_id, find_own_window_id
+        from bridge import get_win_id
 
         if self._dragging:
             return
 
-        # wmctrl/xdotoolはInk Boss自身のバイナリではない外部コマンドのため、
-        # PyInstaller由来のLD_LIBRARY_PATH等を取り除いた環境で呼ぶ
-        # （sysenv.py参照）。ドラッグループは60fps相当で呼ばれるため、
-        # ループの外で一度だけ作って使い回す。
-        clean_env = get_clean_subprocess_env()
-
         win_id = get_win_id()
         if not win_id:
             # タイトル一致だけでなく自プロセスのPID一致も要求する
-            # （bridge.find_own_window_idのdocstring参照。無関係な
+            # （winctl.find_own_window_idのdocstring参照。無関係な
             # 外部アプリのウィンドウを誤ってドラッグ対象として掴む
             # 実害のあるバグがあったため）。
-            win_id = find_own_window_id("Ink Boss")
+            win_id = winctl.find_own_window_id("Ink Boss")
         if not win_id:
             return
 
-        def _get_mouse_pos():
-            r = subprocess.run(
-                ["xdotool", "getmouselocation", "--shell"],
-                capture_output=True, text=True, env=clean_env,
-            )
-            x = y = 0
-            for line in r.stdout.splitlines():
-                if line.startswith("X="):
-                    x = int(line.split("=")[1])
-                elif line.startswith("Y="):
-                    y = int(line.split("=")[1])
-            return x, y
-
-        def _get_win_pos():
-            r = subprocess.run(
-                ["xdotool", "getwindowgeometry", "--shell", win_id],
-                capture_output=True,
-                text=True,
-                env=clean_env,
-            )
-            x = y = 0
-            for line in r.stdout.splitlines():
-                if line.startswith("X="):
-                    x = int(line.split("=")[1])
-                elif line.startswith("Y="):
-                    y = int(line.split("=")[1])
-            return x, y
-
-        mx0, my0 = _get_mouse_pos()
-        wx0, wy0 = _get_win_pos()
+        # マウス・ウィンドウ座標の取得と移動は winctl 経由（Linuxでは
+        # xdotool/wmctrl。外部コマンドなのでPyInstaller由来の環境汚染対策は
+        # winctl側でsysenv経由に統一してある）。
+        mouse0 = winctl.get_mouse_position()
+        win0 = winctl.get_window_position(win_id)
+        if mouse0 is None or win0 is None:
+            # この環境では座標が取れない（Windows実装前など）。取れない値を
+            # (0,0)として動かすとウィンドウが飛ぶため、ドラッグ自体を始めない。
+            return
+        mx0, my0 = mouse0
+        wx0, wy0 = win0
         self._dragging = True
         # ドラッグ中は Electron を一旦 hide するとズレが目立たないが、
         # B1 UX は「ついてくる」なので毎フレーム bounds 同期する。
@@ -849,19 +813,20 @@ class InkBossAPI:
         def _drag_loop():
             last_sync = 0.0
             while self._dragging:
-                mx, my = _get_mouse_pos()
+                pos = winctl.get_mouse_position()
+                if pos is None:
+                    time.sleep(0.016)
+                    continue
+                mx, my = pos
                 dx, dy = mx - mx0, my - my0
                 if dx != 0 or dy != 0:
-                    subprocess.run(
-                        ["wmctrl", "-ir", win_id, "-e", f"0,{wx0 + dx},{wy0 + dy},-1,-1"],
-                        check=False, env=clean_env,
-                    )
+                    winctl.move_window(win_id, wx0 + dx, wy0 + dy)
                     # pywebview window.x/y も更新（screen_rect 用）
                     try:
                         w = webview.windows[0] if webview.windows else None
                         if w is not None:
                             # 内部座標が古いままだと bounds がずれるので
-                            # xdotool の実座標を信頼して screen_rect 側で再計算
+                            # OS側の実座標を信頼して screen_rect 側で再計算
                             pass
                     except Exception:
                         pass
@@ -872,8 +837,9 @@ class InkBossAPI:
                 time.sleep(0.016)
             # ドラッグ終了後に最終同期
             try:
-                wx, wy = _get_win_pos()
-                self._sync_overlay_from_win_pos(wx, wy)
+                final = winctl.get_window_position(win_id)
+                if final is not None:
+                    self._sync_overlay_from_win_pos(*final)
             except Exception:
                 pass
 
@@ -909,27 +875,14 @@ class InkBossAPI:
             pass
 
     def drag_window_by(self, dx, dy):
-        import subprocess
         from bridge import get_win_id
 
         win_id = get_win_id()
         if not win_id:
             return
-        clean_env = get_clean_subprocess_env()
-        pos = subprocess.run(
-            ["xdotool", "getwindowgeometry", "--shell", win_id],
-            capture_output=True,
-            text=True,
-            env=clean_env,
-        )
-        x = y = 0
-        for line in pos.stdout.splitlines():
-            if line.startswith("X="):
-                x = int(line.split("=")[1])
-            elif line.startswith("Y="):
-                y = int(line.split("=")[1])
-        subprocess.run(
-            ["wmctrl", "-ir", win_id, "-e", f"0,{x + int(dx)},{y + int(dy)},-1,-1"],
-            check=False, env=clean_env,
-        )
+        pos = winctl.get_window_position(win_id)
+        if pos is None:
+            return
+        x, y = pos
+        winctl.move_window(win_id, x + int(dx), y + int(dy))
         self._sync_overlay_from_win_pos(x + int(dx), y + int(dy))
