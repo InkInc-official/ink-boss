@@ -245,6 +245,7 @@ def main():
         get_screen_rect_fn=get_screen_rect,
     )
     api.start_auto_hibernate()
+    api.start_overlay_follower()
     # 終了は bridge シグナル経由で Qt メインスレッド実行
     bridge.set_shutdown_handler(api._shutdown_for_exit)
     _orig_set = api.set_aide_width
@@ -276,6 +277,11 @@ def main():
         すると暗転バグになるため）。"""
         import time as _time
         _ts = _time.time()
+        if sys.platform == "win32":
+            # Windowsでは Electron が Ink Boss のオーナー付き窓になっており、
+            # 他アプリが前面のときの前後関係もOSが保つ。通知ベースで隠すと
+            # 復帰時の再表示と競合して「消える」不具合の原因になるため行わない。
+            return
         if not (electron_engine and electron_engine.is_available() and electron_engine.active_sid):
             print(f"[DIAG-FOCUS] {_ts:.3f} source={source} skipped: no active electron service", flush=True)
             return
@@ -395,6 +401,21 @@ def main():
             _th.Timer(delay_s, lambda: api.close_window()).start()
 
     window.events.shown += _on_shown
+
+    # 最小化→復帰・最大化の後に、隠れたElectronオーバーレイを戻す。
+    # 復帰直後はウィンドウ位置・サイズがまだ確定していないことがあるため、
+    # 少し待ってから再表示する（表示中なら位置・サイズの更新だけで冪等）。
+    def _reshow_overlay_soon(*_args):
+        import threading as _th2
+        _th2.Timer(0.35, api.reshow_active_overlay).start()
+
+    # Windowsでは api.start_overlay_follower が状態から表示を決めるため不要
+    # （通知ベースの出し直しと競合して食い違いの元になる）。
+    for _ev_name in (() if sys.platform == "win32" else ("shown", "restored", "maximized")):
+        try:
+            getattr(window.events, _ev_name).__iadd__(_reshow_overlay_soon)
+        except Exception as _e:
+            print(f"[main] events.{_ev_name} hook failed: {_e}", flush=True)
 
     # ウィンドウが閉じられたとき（destroy 後）の保険ログ
     def _on_closed():

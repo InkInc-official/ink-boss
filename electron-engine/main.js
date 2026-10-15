@@ -98,7 +98,11 @@ function createServiceWindow(sid, url, opts = {}) {
     type: "utility",
     autoHideMenuBar: true,
     focusable: true,
-    alwaysOnTop: true,
+    // Windowsでは Python 側が Ink Boss本体を「オーナー窓」に設定する(winctl.set_owner)。
+    // オーナー付きの窓はOSが 常にオーナーの手前に表示・最小化/復帰に連動・
+    // 他アプリの背面では一緒に隠れる ので、alwaysOnTop は不要（付けると他アプリの
+    // 手前にまで居座る）。Linuxは従来どおり。
+    alwaysOnTop: process.platform !== "win32",
     wmClass: "InkBoss",
     fullscreen: false,
     width: 800,
@@ -279,6 +283,16 @@ function applyBounds(win, bounds) {
       width: Math.round(w),
       height: Math.round(h),
     });
+    if (process.env.INK_BOSS_WINDEBUG) {
+      // 【診断用】要求したboundsと、実際に反映されたboundsを比較する
+      const got = win.getBounds();
+      console.error(
+        `[electron-engine] applyBounds req=(${Math.round(x)},${Math.round(y)},${Math.round(w)}x${Math.round(h)}) ` +
+        `got=(${got.x},${got.y},${got.width}x${got.height}) visible=${win.isVisible()} resizable=${win.isResizable()}`
+      );
+    }
+  } else if (process.env.INK_BOSS_WINDEBUG) {
+    console.error(`[electron-engine] applyBounds ignored (invalid) ${JSON.stringify(bounds)}`);
   }
 }
 
@@ -332,7 +346,19 @@ function showService(sid, bounds) {
     win.setFullScreen(false);
   }
   activeId = sid;
-  return { ok: true, sid };
+  return { ok: true, sid, hwnd: nativeHwnd(win) };
+}
+
+// BrowserWindowのネイティブウィンドウハンドル（Windowsのみ。他OSは null）。
+// Python側がオーナー設定(winctl.set_owner)に使う。
+function nativeHwnd(win) {
+  if (process.platform !== "win32") return null;
+  try {
+    const buf = win.getNativeWindowHandle();
+    return buf.length >= 8 ? Number(buf.readBigUInt64LE(0)) : buf.readUInt32LE(0);
+  } catch (_) {
+    return null;
+  }
 }
 
 function setBounds(sid, bounds) {

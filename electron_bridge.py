@@ -478,7 +478,7 @@ class ElectronEngine:
                 if len(self._stderr_tail) > 40:
                     self._stderr_tail = self._stderr_tail[-40:]
                 low = line.lower()
-                if any(k in low for k in ("error", "fail", "ready", "listening", "created", "shutdown", "quit", "crash", "recover")):
+                if any(k in low for k in ("error", "fail", "ready", "listening", "created", "shutdown", "quit", "crash", "recover", "applybounds")):
                     print(f"[electron-engine:err] {line}", flush=True)
         except Exception:
             pass

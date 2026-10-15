@@ -8,6 +8,7 @@ pywebview js_api + dual-engine routing (qt | electron).
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -47,6 +48,8 @@ class InkBossAPI:
         # 自動休止の除外判定には使えない。show_service で記録する専用の値を使う。
         self._active_sid: str | None = None
         self._active_set_at: float = 0.0
+        # Windows: ElectronオーバーレイのHWND -> オーナー設定済みか（sid -> hwnd）
+        self._overlay_owner_bound: dict[str, int] = {}
 
     # ── helpers ───────────────────────────────────────────
     def _find_service(self, sid: str) -> dict | None:
@@ -178,6 +181,99 @@ class InkBossAPI:
                 self._auto_hibernate_tick()
             except Exception as e:
                 print(f"[auto-hibernate] tick error: {e}", flush=True)
+
+    # ── Electronオーバーレイ追従（Windows） ─────────────────
+    OVERLAY_FOLLOW_TICK_S = 0.033
+
+    def start_overlay_follower(self) -> None:
+        """Windows: Electronの画面を「Ink Bossに紐づける」。
+
+        ・表示/非表示/最小化/復帰/前後関係は、ElectronのウィンドウをInk Bossの
+          「オーナー付き窓」にして OS に任せる（_bind_overlay_owner）。
+          通知（最小化・フォーカス変化など）を個別に受けて出し隠しする方式は、
+          通知の到着順で食い違い、最大化→最小化→復帰で消える不具合の原因だった。
+        ・位置と大きさは、OSが報告するInk Bossの実際の領域に毎回合わせる
+          （変化があったときだけElectronへ送る）。
+        OSの実座標が取れない環境（Linux等）では何もしない（従来の通知ベース）。"""
+        if not winctl.IS_WINDOWS:
+            return
+        threading.Thread(target=self._overlay_follow_loop, daemon=True).start()
+
+    def _overlay_follow_loop(self) -> None:
+        import time as _t
+        from bridge import get_win_id
+
+        last_rect = None
+        while True:
+            _t.sleep(self.OVERLAY_FOLLOW_TICK_S)
+            try:
+                sid = self._active_sid
+                eng = self._electron
+                if (
+                    not sid
+                    or self._active_engine != "electron"
+                    or self._service_engine(sid) != "electron"
+                    or not eng
+                    or not eng.is_available()
+                    or not getattr(eng, "is_shown", False)
+                ):
+                    last_rect = None
+                    continue
+                wid = get_win_id()
+                if not wid or winctl.is_minimized(wid):
+                    continue
+                w = webview.windows[0] if webview.windows else None
+                if not w:
+                    continue
+                rect = self._screen_rect(w, self._aide_width_val)
+                if rect != last_rect:
+                    last_rect = rect
+                    eng.bounds(sid, *rect)
+            except Exception as e:
+                print(f"[overlay-follow] {e}", flush=True)
+
+    def _bind_overlay_owner(self, sid: str, resp) -> None:
+        """Electronの窓(resp['hwnd'])を、Ink Bossの窓のオーナー付きにする（Windows）。
+        同じHWNDには1度だけ設定する。"""
+        if not winctl.IS_WINDOWS or not isinstance(resp, dict):
+            return
+        hwnd = resp.get("hwnd")
+        if not hwnd or self._overlay_owner_bound.get(sid) == hwnd:
+            return
+        from bridge import get_win_id
+
+        owner = get_win_id()
+        if not owner:
+            return
+        if winctl.set_window_owner(hwnd, owner):
+            self._overlay_owner_bound[sid] = hwnd
+            print(f"[api] overlay owner bound: electron={hwnd} -> inkboss={owner}", flush=True)
+        else:
+            print(f"[api] overlay owner bind FAILED: electron={hwnd} inkboss={owner}", flush=True)
+
+    def reshow_active_overlay(self) -> None:
+        """最小化・復帰などでElectronの窓が隠れたままになった場合に、表示中の
+        Electronサービスを現在のウィンドウ位置・サイズで再表示する。
+        最小化時は minimize_window が hide_all() でオーバーレイを隠すが、復帰時に
+        Qtのビューと違って自動では戻らないため、ここで戻す（冪等。表示中なら
+        位置とサイズの更新だけが行われる）。Electronが表示中でなければ何もしない。"""
+        sid = self._active_sid
+        if not sid or self._active_engine != "electron":
+            return
+        if self._service_engine(sid) != "electron":
+            return
+        if not self._electron or not self._electron.is_available():
+            return
+        w = webview.windows[0] if webview.windows else None
+        if not w:
+            return
+        svc = self._find_service(sid)
+        url = (svc or {}).get("url") or self._bridge.urls.get(sid, "about:blank")
+        try:
+            sx, sy, sw, sh = self._screen_rect(w, self._aide_width_val)
+            self._bind_overlay_owner(sid, self._electron.show(sid, url, sx, sy, sw, sh))
+        except Exception as e:
+            print(f"[api] reshow_active_overlay: {e}", flush=True)
 
     def sync_active_overlay(self) -> None:
         """B1: drag/resize 中に Electron をコンテンツ領域へ追従させる。
@@ -349,7 +445,8 @@ class InkBossAPI:
 
             def _do():
                 try:
-                    self._electron.show(sid, url, sx, sy, sw, sh)
+                    _r = self._electron.show(sid, url, sx, sy, sw, sh)
+                    self._bind_overlay_owner(sid, _r)
                     js_eval(
                         f"window.dispatchEvent(new CustomEvent('service-woke',"
                         f"{{detail:{json.dumps(sid)}}}))"
@@ -360,6 +457,14 @@ class InkBossAPI:
             threading.Thread(target=_do, daemon=True).start()
             self._active_engine = "electron"
             self._bridge.active_id = sid
+            # 上の _hide_other_engine が積んだ _hide_all（Qt側で active_id=None に
+            # する）が後から実行されて active_id を消してしまい、Electron表示中の
+            # ウィンドウ移動・リサイズに追従しなくなる（Windowsで実機確認）。
+            # 同じキューの最後（_hide_allの後）で active_id を設定し直す。
+            self._bridge.run_on_gui_signal.emit(
+                lambda _sid=sid: setattr(self._bridge, "active_id", _sid)
+                if self._active_sid == _sid else None
+            )
             return
 
         # Qt
@@ -649,8 +754,9 @@ class InkBossAPI:
         print("[Close] soft watchdog armed (1200ms)", flush=True)
         print("[Close][Step 5/5] Soft watchdog armed end", flush=True)
     def minimize_window(self):
-        # 最小化前にオーバーレイを隠す
-        if self._electron and self._electron.is_available():
+        # 最小化前にオーバーレイを隠す。Windowsではオーナー窓の仕組みで
+        # Electronが Ink Boss と一緒に隠れ・戻るので、ここでは何もしない。
+        if (not winctl.IS_WINDOWS) and self._electron and self._electron.is_available():
             try:
                 self._electron.hide_all()
             except Exception:

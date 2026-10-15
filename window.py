@@ -22,23 +22,45 @@ from config import SIDEBAR_W, URLBAR_H
 from bridge import set_win_id
 
 
-def get_rect(window, aide_w: int = 0) -> tuple[int, int, int, int]:
-    """コンテンツ領域（ウィンドウクライアント相対）。"""
+def get_rect(window, aide_w: int = 0, size=None) -> tuple[int, int, int, int]:
+    """コンテンツ領域（ウィンドウクライアント相対）。
+    size=(幅, 高さ) を渡すと window.width/height の代わりに使う
+    （resizedイベントが通知した新サイズを使うため。window.width/heightは
+    イベント直後だと古い値のことがある）。"""
+    ww, wh = size if size is not None else (window.width, window.height)
     return (
         SIDEBAR_W,
         URLBAR_H,
-        max(1, int(window.width) - SIDEBAR_W - aide_w),
-        max(1, int(window.height) - URLBAR_H),
+        max(1, int(ww) - SIDEBAR_W - aide_w),
+        max(1, int(wh) - URLBAR_H),
     )
 
 
-def get_screen_rect(window, aide_w: int = 0) -> tuple[int, int, int, int]:
+def get_screen_rect(window, aide_w: int = 0, size=None) -> tuple[int, int, int, int]:
     """
     コンテンツ領域の画面絶対座標。
     Electron B1 オーバーレイ用。
-    frameless 時は window.x/y がフレーム原点と一致しやすい。
+
+    Windowsでは、OSが報告するウィンドウの実際の位置と大きさ（winctl.get_window_rect）
+    を唯一の基準にする。pywebviewの内部値（window.x/y/width/height や
+    resizedイベントの値）はドラッグ・最大化・復帰の直後に古いことがあり、
+    それを混ぜるとオーバーレイの位置・大きさがずれるため。
+    取得できない環境（Linux等）では従来どおり pywebview の値を使う。
     """
-    x, y, w, h = get_rect(window, aide_w)
+    try:
+        from bridge import get_win_id
+
+        wid = get_win_id()
+        if wid:
+            native = winctl.get_window_rect(wid)
+            if native is not None:
+                nx, ny, nw, nh = native
+                _x, _y, cw, ch = get_rect(window, aide_w, (nw, nh))
+                return nx + SIDEBAR_W, ny + URLBAR_H, cw, ch
+    except Exception:
+        pass
+
+    x, y, w, h = get_rect(window, aide_w, size)
     wx = int(getattr(window, "x", 0) or 0)
     wy = int(getattr(window, "y", 0) or 0)
     # OS側の実座標があれば優先（ドラッグ直後の pywebview 内部値が古いことがある）。
@@ -152,7 +174,7 @@ def on_shown(window, bridge, icon_path: Path, aide_width_getter) -> None:
         if eng in ("electron", "e"):
             electron = getattr(bridge, "electron", None)
             if electron is not None and electron.is_available():
-                sx, sy, sw, sh = get_screen_rect(window, aide_w)
+                sx, sy, sw, sh = get_screen_rect(window, aide_w, (width, height))
 
                 def _sync():
                     try:
@@ -162,7 +184,11 @@ def on_shown(window, bridge, icon_path: Path, aide_width_getter) -> None:
 
                 threading.Thread(target=_sync, daemon=True).start()
             return
-        x, y, w, h = get_rect(window, aide_w)
+        x, y, w, h = get_rect(window, aide_w, (width, height))
         bridge.show_view_signal.emit(sid, x, y, w, h)
 
-    window.events.resized += on_resized
+    # on_shown は復帰のたびに呼ばれるため、リサイズ通知の登録は1回だけにする
+    # （重複登録すると復帰のたびに同じ処理が何重にも走る）。
+    if not getattr(on_shown, "_resized_registered", False):
+        on_shown._resized_registered = True
+        window.events.resized += on_resized

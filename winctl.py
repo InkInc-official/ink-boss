@@ -442,6 +442,83 @@ def get_window_position(win_id: str, timeout: float | None = None) -> tuple[int,
     return None
 
 
+def get_window_rect(win_id: str) -> tuple[int, int, int, int] | None:
+    """ウィンドウ全体の画面絶対座標 (x, y, 幅, 高さ)。Windowsのみ実装。
+    最小化中・取得不能・非Windowsでは None（呼び出し側は従来の取得方法に
+    フォールバックする）。Electronオーバーレイを「Ink Bossの実際の大きさ」に
+    ぴったり合わせるための、唯一の基準値として使う。"""
+    if IS_WINDOWS:
+        try:
+            hwnd = _win_hwnd(win_id)
+            if hwnd is None:
+                return None
+            a = _w()
+            if a.user32.IsIconic(hwnd):
+                return None
+            rect = a.wt.RECT()
+            if not a.user32.GetWindowRect(hwnd, a.ctypes.byref(rect)):
+                return None
+            w = int(rect.right - rect.left)
+            h = int(rect.bottom - rect.top)
+            if w <= 1 or h <= 1:
+                return None
+            return int(rect.left), int(rect.top), w, h
+        except Exception:
+            return None
+    return None
+
+
+def set_window_owner(child_hwnd, owner_win_id) -> bool:
+    """child_hwnd のトップレベル窓の「オーナー窓」を owner_win_id に設定する
+    （Windowsのみ）。オーナー付きの窓はOSが次を保証する:
+      ・常にオーナーの手前に表示される（他アプリの手前にまでは出ない）
+      ・オーナーが最小化されると一緒に隠れ、復帰すると一緒に戻る
+      ・オーナーが最大化・移動・前面化されても z順の関係が保たれる
+    Electronのオーバーレイを「Ink Bossに紐づける」ための仕組み。
+    （GWLP_HWNDPARENT=-8 は、トップレベル窓ではオーナーを意味する）"""
+    if not IS_WINDOWS:
+        return False
+    try:
+        child = int(child_hwnd)
+        owner = _win_hwnd(owner_win_id)
+        if not child or owner is None or not _w().user32.IsWindow(child):
+            return False
+        u = _w().user32
+        u.SetWindowLongPtrW(child, -8, owner)
+        return int(u.GetWindowLongPtrW(child, -8)) == owner
+    except Exception:
+        return False
+
+
+def get_window_pid(win_id) -> int | None:
+    """ウィンドウを所有するプロセスのPID。Windowsのみ実装（他は None）。"""
+    if IS_WINDOWS:
+        try:
+            hwnd = _win_hwnd(win_id)
+            if hwnd is None:
+                return None
+            a = _w()
+            pid = a.wt.DWORD(0)
+            a.user32.GetWindowThreadProcessId(hwnd, a.ctypes.byref(pid))
+            return int(pid.value) or None
+        except Exception:
+            return None
+    return None
+
+
+def is_minimized(win_id: str) -> bool | None:
+    """最小化中なら True。判定不能・非Windowsなら None。"""
+    if IS_WINDOWS:
+        try:
+            hwnd = _win_hwnd(win_id)
+            if hwnd is None:
+                return None
+            return bool(_w().user32.IsIconic(hwnd))
+        except Exception:
+            return None
+    return None
+
+
 def get_mouse_position() -> tuple[int, int] | None:
     """マウスカーソルの画面絶対座標 (x, y)。取得できなければ None。"""
     if IS_LINUX:
