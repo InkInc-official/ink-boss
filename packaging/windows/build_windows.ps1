@@ -1,6 +1,6 @@
-﻿# build_windows.ps1 - Ink Boss Windows版ビルドスクリプト（手順5a）
-# 実行場所: プロジェクトのルート（ink-boss フォルダ）、仮想環境(.venv)を有効にした PowerShell
-# 実行方法: powershell -ExecutionPolicy Bypass -File .\build_windows.ps1
+﻿# packaging/windows/build_windows.ps1 - Ink Boss Windows版ビルドスクリプト
+# 実行場所: 仮想環境(.venv)を有効にした PowerShell（どのフォルダからでも可。リポジトリのルートを自動で見つける）
+# 実行方法: powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_windows.ps1
 #
 # やること:
 #   1. 前提の確認（frontend\dist、electron-engine\node_modules、VERSION）
@@ -8,10 +8,11 @@
 #   3. electron-engine を dist\ink-boss\electron-engine へコピー
 #      （PyInstallerを通さない。electron_bridge.py が実行ファイルと同じ階層を見る）
 #
-# 出力: dist\ink-boss\ink-boss.exe（5bでInno Setupがこのフォルダをまとめる）
+# 出力: dist\ink-boss\ink-boss.exe（続けて build_installer.ps1 がこのフォルダをインストーラーにまとめる）
 
 $ErrorActionPreference = "Stop"
-$Src = Split-Path -Parent $MyInvocation.MyCommand.Path
+# このスクリプトは packaging\windows\ にあるので、2つ上がリポジトリのルート
+$Src = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 Set-Location $Src
 
 $Version = (Get-Content (Join-Path $Src "VERSION") -Raw).Trim()

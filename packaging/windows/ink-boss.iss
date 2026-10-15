@@ -1,6 +1,7 @@
 ; Ink Boss Windows インストーラー (Inno Setup 6)
-; ビルド: powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
-; 先に build_windows.ps1 で dist\ink-boss を作っておくこと。
+; ビルド: powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_installer.ps1
+; 先に packaging\windows\build_windows.ps1 で dist\ink-boss を作っておくこと。
+; 相対パスは、このファイル（packaging\windows\）を基準に解決される。
 
 #ifndef AppVersion
   #define AppVersion "1.1.0"
@@ -18,9 +19,9 @@ DefaultGroupName=Ink Boss
 DisableProgramGroupPage=yes
 ; ユーザー単位インストール（管理者権限不要）。自動更新を無人・UACなしで行うため。
 PrivilegesRequired=lowest
-OutputDir=dist\installer
+OutputDir=..\..\dist\installer
 OutputBaseFilename=Ink-Boss-Setup-{#AppVersion}
-SetupIconFile=public\icon.ico
+SetupIconFile=..\..\public\icon.ico
 UninstallDisplayIcon={app}\ink-boss.exe
 Compression=lzma2/normal
 SolidCompression=yes
@@ -37,7 +38,7 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Name: "desktopicon"; Description: "デスクトップにアイコンを作成する"; GroupDescription: "追加のアイコン:"; Flags: unchecked
 
 [Files]
-Source: "dist\ink-boss\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\dist\ink-boss\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Ink Boss"; Filename: "{app}\ink-boss.exe"

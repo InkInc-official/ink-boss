@@ -7,7 +7,7 @@
 **Ink Inc.** が開発する、レシピレスのマルチサービス一元化デスクトップアプリ。
 
 [![license](https://img.shields.io/badge/license-MIT-green)](#license)
-[![platform](https://img.shields.io/badge/platform-Linux-blue)](#)
+[![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-blue)](#)
 [![built with](https://img.shields.io/badge/built%20with-PySide6%20%2B%20Electron-41cd52)](#)
 
 > AI Creation, Human Care. The Future Drawn Together. — Ink Inc.
@@ -75,7 +75,34 @@ Ferdium・Rambox・Station のような「マルチサービス統合アプリ�
 
 ---
 
-## セットアップ
+## インストール
+
+最新版は [Releases](https://github.com/InkInc-official/ink-boss/releases/latest) からダウンロードできます。
+
+### Linux（Debian / Ubuntu 系）
+
+```bash
+sudo dpkg -i ink-boss_<バージョン>_amd64.deb
+```
+
+### Windows
+
+`Ink-Boss-Setup-<バージョン>.exe` を実行してください。管理者権限は不要で、ユーザーごとにインストールされます。
+
+> **SmartScreen の警告について**
+> このインストーラーはコード署名をしていないため、初回実行時に「Windows によってPCが保護されました」と表示されることがあります。
+> **「詳細情報」→「実行」** を選ぶと、インストールを続けられます。
+> ダウンロードしたファイルが改ざんされていないことは、Release の本文に載せた **SHA256** で確認できます。
+>
+> ```powershell
+> Get-FileHash .\Ink-Boss-Setup-<バージョン>.exe -Algorithm SHA256
+> ```
+
+どちらも、起動時に新しいバージョンがあれば、アプリ内の通知から更新できます。
+
+---
+
+## セットアップ（ソースから動かす）
 
 ### 必要なもの
 
@@ -110,9 +137,23 @@ python3 main.py
 
 設定・セッションは以下に保存されます。
 
-- `~/.config/ink-boss/config.json`
-- `~/.config/ink-boss/sessions/`（Qtエンジンのプロファイル）
-- `~/.config/ink-boss/electron-userdata/`（Electronエンジンのプロファイル）
+| | Linux | Windows |
+|---|---|---|
+| 設定 | `~/.config/ink-boss/config.json` | `%APPDATA%\ink-boss\config.json` |
+| Qtエンジンのプロファイル | `~/.config/ink-boss/sessions/` | `%APPDATA%\ink-boss\sessions\` |
+| Electronエンジンのプロファイル | `~/.config/ink-boss/electron-userdata/` | `%APPDATA%\ink-boss\electron-userdata\` |
+
+### Windows 用のビルド
+
+仮想環境を有効にした PowerShell で、次を順に実行します（Inno Setup 6 が必要です）。
+
+```powershell
+npm install --prefix frontend; npm run build --prefix frontend
+powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_windows.ps1
+powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_installer.ps1
+```
+
+出力: `dist\installer\Ink-Boss-Setup-<バージョン>.exe`
 
 ---
 
@@ -120,7 +161,8 @@ python3 main.py
 
 - [ ] 1サービス内での複数タブ機能
 - [x] サービスのフォルダ分け（ドラッグ&ドロップでの並べ替え）
-- [ ] Windows / macOS対応
+- [x] Windows対応
+- [ ] macOS対応
 - [x] Aide（サイドパネルAIアシスタント）の正式統合
 - [x] 配布パッケージ（.deb）のビルドスクリプト
 - [ ] AppImage対応（検討中）
@@ -131,7 +173,7 @@ python3 main.py
 
 Issue・Pull Request、歓迎します。特に以下の分野での貢献を歓迎しています。
 
-- Windows / macOS対応
+- macOS対応
 - サービスごとのバッジ通知（未読数表示）
 - UI/UXの改善
 
@@ -167,7 +209,7 @@ AIによる創造と人によるケアを両立するIRIAMライバー事務所�
 A recipe-less, multi-service desktop app developed by **Ink Inc.**
 
 [![license](https://img.shields.io/badge/license-MIT-green)](#license)
-[![platform](https://img.shields.io/badge/platform-Linux-blue)](#)
+[![platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-blue)](#)
 [![built with](https://img.shields.io/badge/built%20with-PySide6%20%2B%20Electron-41cd52)](#)
 
 > AI Creation, Human Care. The Future Drawn Together. — Ink Inc.
@@ -224,7 +266,34 @@ Existing "everything in one app" tools accumulate a "recipe" per service and eve
 
 ---
 
-### Setup
+### Install
+
+Download the latest build from [Releases](https://github.com/InkInc-official/ink-boss/releases/latest).
+
+**Linux (Debian / Ubuntu)**
+
+```bash
+sudo dpkg -i ink-boss_<version>_amd64.deb
+```
+
+**Windows**
+
+Run `Ink-Boss-Setup-<version>.exe`. No administrator rights are needed; it installs per user.
+
+> **About the SmartScreen warning**
+> The installer is not code-signed, so Windows may show "Windows protected your PC" on first run.
+> Choose **"More info" → "Run anyway"** to continue.
+> You can verify the download against the **SHA256** published in the release notes:
+>
+> ```powershell
+> Get-FileHash .\Ink-Boss-Setup-<version>.exe -Algorithm SHA256
+> ```
+
+On both platforms, Ink Boss notifies you at startup when a newer version is available and can update itself.
+
+---
+
+### Setup (run from source)
 
 **Requirements**
 
@@ -259,9 +328,21 @@ python3 main.py
 
 Config and sessions are stored at:
 
-- `~/.config/ink-boss/config.json`
-- `~/.config/ink-boss/sessions/` (Qt engine profiles)
-- `~/.config/ink-boss/electron-userdata/` (Electron engine profiles)
+| | Linux | Windows |
+|---|---|---|
+| Config | `~/.config/ink-boss/config.json` | `%APPDATA%\ink-boss\config.json` |
+| Qt engine profiles | `~/.config/ink-boss/sessions/` | `%APPDATA%\ink-boss\sessions\` |
+| Electron engine profiles | `~/.config/ink-boss/electron-userdata/` | `%APPDATA%\ink-boss\electron-userdata\` |
+
+**Building for Windows** (in PowerShell with the virtualenv active; Inno Setup 6 required)
+
+```powershell
+npm install --prefix frontend; npm run build --prefix frontend
+powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_windows.ps1
+powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_installer.ps1
+```
+
+Output: `dist\installer\Ink-Boss-Setup-<version>.exe`
 
 ---
 
@@ -269,7 +350,8 @@ Config and sessions are stored at:
 
 - [ ] Multiple tabs within a single service
 - [x] Folder grouping for services (drag & drop reordering)
-- [ ] Windows / macOS support
+- [x] Windows support
+- [ ] macOS support
 - [x] Official integration of Aide (the sidebar AI assistant)
 - [x] Build script for the .deb distribution package
 - [ ] AppImage support (under consideration)
@@ -280,7 +362,7 @@ Config and sessions are stored at:
 
 Issues and pull requests are welcome. We'd especially love help with:
 
-- Windows / macOS support
+- macOS support
 - Per-service unread/badge notifications
 - UI/UX improvements
 

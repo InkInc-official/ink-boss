@@ -1,9 +1,10 @@
 ﻿# Ink Boss Windows インストーラーのビルド
-# 使い方: powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
+# 使い方: powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_installer.ps1
 # 前提: build_windows.ps1 で dist\ink-boss が作成済みであること / Inno Setup 6 がインストール済みであること
 
 $ErrorActionPreference = "Stop"
-$Src = Split-Path -Parent $MyInvocation.MyCommand.Path
+# このスクリプトは packaging\windows\ にあるので、2つ上がリポジトリのルート
+$Src = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 Set-Location $Src
 
 Write-Host "========================================"
@@ -11,7 +12,7 @@ Write-Host "  Ink Boss インストーラー作成"
 Write-Host "========================================"
 
 if (-not (Test-Path (Join-Path $Src "dist\ink-boss\ink-boss.exe"))) {
-    Write-Host "dist\ink-boss\ink-boss.exe がありません。先に build_windows.ps1 を実行してください"
+    Write-Host "dist\ink-boss\ink-boss.exe がありません。先に packaging\windows\build_windows.ps1 を実行してください"
     exit 1
 }
 
@@ -32,7 +33,7 @@ Write-Host "コンパイラ: $Iscc"
 Write-Host ""
 Write-Host "> コンパイル中（約860MBを圧縮するため数分かかります）..."
 
-& $Iscc "/DAppVersion=$Version" (Join-Path $Src "ink-boss.iss")
+& $Iscc "/DAppVersion=$Version" (Join-Path $Src "packaging\windows\ink-boss.iss")
 if ($LASTEXITCODE -ne 0) {
     Write-Host "インストーラーのコンパイルに失敗しました"
     exit 1
