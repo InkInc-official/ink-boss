@@ -17,8 +17,10 @@ import re
 import socket
 import subprocess
 import shutil
+import sys
 from pathlib import Path
 
+from platform_paths import config_dir
 from sysenv import get_clean_subprocess_env
 
 
@@ -379,7 +381,13 @@ def _setup_ime_impl() -> str:
 
 def setup_ime() -> str:
     """IMEバックエンドを自動検出して環境変数を設定する（詳細は _setup_ime_impl）。
-    どの分岐で返っても、上書き後の値を必ず [IME-DEBUG] として出力する。"""
+    どの分岐で返っても、上書き後の値を必ず [IME-DEBUG] として出力する。
+
+    fcitx5/ibusの検出とQtプラグインのリンクはLinux専用。Windows等ではOS標準の
+    IMEがそのまま使えるため、何もせず "none" を返す。"""
+    if not sys.platform.startswith("linux"):
+        print("[IME-DEBUG] Linux以外のため setup_ime をスキップ（OS標準IMEを使用）", flush=True)
+        return "none"
     backend = _setup_ime_impl()
     log_ime_env("setup_ime による上書き後")
     return backend
@@ -395,7 +403,7 @@ def setup_ime() -> str:
 # 診断情報を取れるよう、Electron側でF12が押されたときにPythonの
 # プロセス内からfcitx5へ直接問い合わせ、ログファイルに書き出す。
 # ─────────────────────────────────────────────────────────
-IME_DEBUG_LOG = Path.home() / ".config" / "ink-boss" / "ime-debug.log"
+IME_DEBUG_LOG = config_dir() / "ime-debug.log"
 
 
 def dump_ime_debug_info(sid: str, active_element: str = "", proc_diag: str = "") -> None:
@@ -404,6 +412,8 @@ def dump_ime_debug_info(sid: str, active_element: str = "", proc_diag: str = "")
     Electronプロセスツリーの診断情報（proc_diag、electron_bridge.py側で
     収集）を IME_DEBUG_LOG に追記する。main.jsでF12が押されたとき、
     electron_bridge.ElectronEngine.on_ime_debug_requested 経由で呼ばれる。"""
+    if not sys.platform.startswith("linux"):
+        return  # fcitx5/dbus-sendを使うLinux専用の診断
     import datetime
     import subprocess as sp
 
@@ -479,6 +489,8 @@ def log_gtk_diagnostics(electron_binary: str, electron_env: dict | None = None) 
     参照）。ここではElectronに実際に渡る環境でlddを実行することで、
     診断結果と実際の動作を一致させる。省略時は現在のプロセス環境を使う
     （開発時のpython3 main.py直接実行など、サニタイズ不要な場合向け）。"""
+    if not sys.platform.startswith("linux"):
+        return  # ldd・GTK・fcitx5を調べるLinux専用の診断
     import datetime
 
     lines = [f"===== {datetime.datetime.now().isoformat()} Electron起動時のGTK/fcitx5診断 ====="]

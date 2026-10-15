@@ -1,7 +1,8 @@
 /**
  * Ink Boss — Electron Engine Helper (B1: follow overlay, no reparent)
  *
- * - Fixed userData under ~/.config/ink-boss/electron-userdata  → session persistence
+ * - Fixed userData under <config>/ink-boss/electron-userdata    → session persistence
+ *   (<config> = ~/.config on Linux, %APPDATA% on Windows)
  * - partition persist:inkboss-{sid}                             → multi-account
  * - show/hide + setBounds only                                 → no SetParent
  * - HTTP JSON on 127.0.0.1                                      → Python control
@@ -15,7 +16,12 @@ const fs = require("fs");
 const os = require("os");
 
 // MUST be before ready — stable path for Discord/token disk flush
-const USER_DATA = path.join(os.homedir(), ".config", "ink-boss", "electron-userdata");
+// 保存先の規則は Python 側 platform_paths.config_dir() と必ず揃えること:
+//   Linux: ~/.config/ink-boss   /   Windows: %APPDATA%\ink-boss
+const CONFIG_ROOT = process.platform === "win32"
+  ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "ink-boss")
+  : path.join(os.homedir(), ".config", "ink-boss");
+const USER_DATA = path.join(CONFIG_ROOT, "electron-userdata");
 fs.mkdirSync(USER_DATA, { recursive: true });
 app.setPath("userData", USER_DATA);
 
@@ -92,7 +98,11 @@ function createServiceWindow(sid, url, opts = {}) {
     type: "utility",
     autoHideMenuBar: true,
     focusable: true,
-    alwaysOnTop: true,
+    // Windowsでは Python 側が Ink Boss本体を「オーナー窓」に設定する(winctl.set_owner)。
+    // オーナー付きの窓はOSが 常にオーナーの手前に表示・最小化/復帰に連動・
+    // 他アプリの背面では一緒に隠れる ので、alwaysOnTop は不要（付けると他アプリの
+    // 手前にまで居座る）。Linuxは従来どおり。
+    alwaysOnTop: process.platform !== "win32",
     wmClass: "InkBoss",
     fullscreen: false,
     width: 800,
@@ -257,6 +267,26 @@ function hideAllExcept(keepSid = null) {
   if (!keepSid) activeId = null;
 }
 
+// サイズ・位置の変更が落ち着いたあと（最後の変更から一定時間後）に、
+// 同じ値を再適用して強制的に再描画させる。
+// Windowsでは、最大化⇄元のサイズの切り替え直後などにsetBoundsを連続で
+// 受けると、Electronの画面が再描画されず真っ暗なまま残ることがある
+// （サイドバーから選び直すと、同じboundsの再適用で描画が戻る）。
+function repaintSoon(win, b) {
+  if (process.platform !== "win32") return;
+  if (win.__settleTimer) clearTimeout(win.__settleTimer);
+  win.__settleTimer = setTimeout(() => {
+    win.__settleTimer = null;
+    try {
+      if (win.isDestroyed() || !win.isVisible()) return;
+      win.setBounds(b);
+      if (typeof win.webContents.invalidate === "function") {
+        win.webContents.invalidate();
+      }
+    } catch (_) {}
+  }, 150);
+}
+
 function applyBounds(win, bounds) {
   const { x, y, w, h } = bounds || {};
   if (
@@ -267,12 +297,24 @@ function applyBounds(win, bounds) {
     w > 1 &&
     h > 1
   ) {
-    win.setBounds({
+    const b = {
       x: Math.round(x),
       y: Math.round(y),
       width: Math.round(w),
       height: Math.round(h),
-    });
+    };
+    win.setBounds(b);
+    repaintSoon(win, b);
+    if (process.env.INK_BOSS_WINDEBUG) {
+      // 【診断用】要求したboundsと、実際に反映されたboundsを比較する
+      const got = win.getBounds();
+      console.error(
+        `[electron-engine] applyBounds req=(${Math.round(x)},${Math.round(y)},${Math.round(w)}x${Math.round(h)}) ` +
+        `got=(${got.x},${got.y},${got.width}x${got.height}) visible=${win.isVisible()} resizable=${win.isResizable()}`
+      );
+    }
+  } else if (process.env.INK_BOSS_WINDEBUG) {
+    console.error(`[electron-engine] applyBounds ignored (invalid) ${JSON.stringify(bounds)}`);
   }
 }
 
@@ -326,7 +368,19 @@ function showService(sid, bounds) {
     win.setFullScreen(false);
   }
   activeId = sid;
-  return { ok: true, sid };
+  return { ok: true, sid, hwnd: nativeHwnd(win) };
+}
+
+// BrowserWindowのネイティブウィンドウハンドル（Windowsのみ。他OSは null）。
+// Python側がオーナー設定(winctl.set_owner)に使う。
+function nativeHwnd(win) {
+  if (process.platform !== "win32") return null;
+  try {
+    const buf = win.getNativeWindowHandle();
+    return buf.length >= 8 ? Number(buf.readBigUInt64LE(0)) : buf.readUInt32LE(0);
+  } catch (_) {
+    return null;
+  }
 }
 
 function setBounds(sid, bounds) {

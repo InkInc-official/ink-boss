@@ -17,6 +17,12 @@
 # 解決するため、electron-engine/ を実行ファイルと同じ階層に
 # 置きさえすれば dev/frozen どちらでも同じ相対構造で見つかる。
 
+import sys
+
+# Windowsでは UPX 圧縮を使わない（QtのDLLを壊す／ウイルス対策ソフトに
+# 誤検知されやすくなるため）。Linuxは従来どおり。
+_IS_WIN = sys.platform == "win32"
+
 a = Analysis(
     ['main.py'],
     pathex=[],
@@ -48,7 +54,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=not _IS_WIN,
     upx_exclude=[],
     console=False,
     disable_windowed_traceback=False,
@@ -56,6 +62,8 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    # exeのアイコン（Windowsのみ。public/icon.ico）
+    icon='public/icon.ico' if _IS_WIN else None,
 )
 
 coll = COLLECT(
@@ -63,7 +71,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=not _IS_WIN,
     upx_exclude=[],
     name='ink-boss',
 )

@@ -8,12 +8,14 @@ pywebview js_api + dual-engine routing (qt | electron).
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
 
 import webview
 
+import winctl
 from config import save_config
 from bridge import js_eval
 from sysenv import get_clean_subprocess_env
@@ -46,6 +48,8 @@ class InkBossAPI:
         # 自動休止の除外判定には使えない。show_service で記録する専用の値を使う。
         self._active_sid: str | None = None
         self._active_set_at: float = 0.0
+        # Windows: ElectronオーバーレイのHWND -> オーナー設定済みか（sid -> hwnd）
+        self._overlay_owner_bound: dict[str, int] = {}
 
     # ── helpers ───────────────────────────────────────────
     def _find_service(self, sid: str) -> dict | None:
@@ -177,6 +181,124 @@ class InkBossAPI:
                 self._auto_hibernate_tick()
             except Exception as e:
                 print(f"[auto-hibernate] tick error: {e}", flush=True)
+
+    # ── Electronオーバーレイ追従（Windows） ─────────────────
+    OVERLAY_FOLLOW_TICK_S = 0.033
+
+    def start_overlay_follower(self) -> None:
+        """Windows: Electronの画面を「Ink Bossに紐づける」。
+
+        ・表示/非表示/最小化/復帰/前後関係は、ElectronのウィンドウをInk Bossの
+          「オーナー付き窓」にして OS に任せる（_bind_overlay_owner）。
+          通知（最小化・フォーカス変化など）を個別に受けて出し隠しする方式は、
+          通知の到着順で食い違い、最大化→最小化→復帰で消える不具合の原因だった。
+        ・位置と大きさは、OSが報告するInk Bossの実際の領域に毎回合わせる
+          （変化があったときだけElectronへ送る）。
+        OSの実座標が取れない環境（Linux等）では何もしない（従来の通知ベース）。"""
+        if not winctl.IS_WINDOWS:
+            return
+        threading.Thread(target=self._overlay_follow_loop, daemon=True).start()
+
+    def _overlay_follow_loop(self) -> None:
+        import time as _t
+        from bridge import get_win_id
+        from config import SIDEBAR_W, URLBAR_H
+
+        last_rect = None
+        last_qt = None
+        while True:
+            _t.sleep(self.OVERLAY_FOLLOW_TICK_S)
+            try:
+                # Qtエンジン: 表示中のビューを、OSが報告するウィンドウの実サイズに合わせる
+                # （Aideを開いたまま最大化・復帰すると、イベント通知の値が古く崩れるため）。
+                if self._active_engine == "qt" and self._bridge.active_id:
+                    qsid = self._bridge.active_id
+                    wid = get_win_id()
+                    qw = webview.windows[0] if webview.windows else None
+                    if wid and qw and not winctl.is_minimized(wid):
+                        native = winctl.get_window_rect(wid)
+                        if native is not None:
+                            _nx, _ny, nw, nh = native
+                            if nw > SIDEBAR_W and nh > URLBAR_H:
+                                q_rect = (
+                                    SIDEBAR_W,
+                                    URLBAR_H,
+                                    max(1, int(nw) - SIDEBAR_W - self._aide_width_val),
+                                    max(1, int(nh) - URLBAR_H),
+                                )
+                                key = (qsid,) + q_rect
+                                if key != last_qt:
+                                    last_qt = key
+                                    self._bridge.set_view_geometry_signal.emit(qsid, *q_rect)
+                    continue
+                last_qt = None
+                sid = self._active_sid
+                eng = self._electron
+                if (
+                    not sid
+                    or self._active_engine != "electron"
+                    or self._service_engine(sid) != "electron"
+                    or not eng
+                    or not eng.is_available()
+                    or not getattr(eng, "is_shown", False)
+                ):
+                    last_rect = None
+                    continue
+                wid = get_win_id()
+                if not wid or winctl.is_minimized(wid):
+                    continue
+                w = webview.windows[0] if webview.windows else None
+                if not w:
+                    continue
+                rect = self._screen_rect(w, self._aide_width_val)
+                if rect != last_rect:
+                    last_rect = rect
+                    eng.bounds(sid, *rect)
+            except Exception as e:
+                print(f"[overlay-follow] {e}", flush=True)
+
+    def _bind_overlay_owner(self, sid: str, resp) -> None:
+        """Electronの窓(resp['hwnd'])を、Ink Bossの窓のオーナー付きにする（Windows）。
+        同じHWNDには1度だけ設定する。"""
+        if not winctl.IS_WINDOWS or not isinstance(resp, dict):
+            return
+        hwnd = resp.get("hwnd")
+        if not hwnd or self._overlay_owner_bound.get(sid) == hwnd:
+            return
+        from bridge import get_win_id
+
+        owner = get_win_id()
+        if not owner:
+            return
+        if winctl.set_window_owner(hwnd, owner):
+            self._overlay_owner_bound[sid] = hwnd
+            print(f"[api] overlay owner bound: electron={hwnd} -> inkboss={owner}", flush=True)
+        else:
+            print(f"[api] overlay owner bind FAILED: electron={hwnd} inkboss={owner}", flush=True)
+
+    def reshow_active_overlay(self) -> None:
+        """最小化・復帰などでElectronの窓が隠れたままになった場合に、表示中の
+        Electronサービスを現在のウィンドウ位置・サイズで再表示する。
+        最小化時は minimize_window が hide_all() でオーバーレイを隠すが、復帰時に
+        Qtのビューと違って自動では戻らないため、ここで戻す（冪等。表示中なら
+        位置とサイズの更新だけが行われる）。Electronが表示中でなければ何もしない。"""
+        sid = self._active_sid
+        if not sid or self._active_engine != "electron":
+            return
+        if self._service_engine(sid) != "electron":
+            return
+        if not self._electron or not self._electron.is_available():
+            return
+        w = webview.windows[0] if webview.windows else None
+        if not w:
+            return
+        svc = self._find_service(sid)
+        url = (svc or {}).get("url") or self._bridge.urls.get(sid, "about:blank")
+        try:
+            sx, sy, sw, sh = self._screen_rect(w, self._aide_width_val)
+            self._bind_overlay_owner(sid, self._electron.show(sid, url, sx, sy, sw, sh))
+        except Exception as e:
+            print(f"[api] reshow_active_overlay: {e}", flush=True)
 
     def sync_active_overlay(self) -> None:
         """B1: drag/resize 中に Electron をコンテンツ領域へ追従させる。
@@ -348,7 +470,8 @@ class InkBossAPI:
 
             def _do():
                 try:
-                    self._electron.show(sid, url, sx, sy, sw, sh)
+                    _r = self._electron.show(sid, url, sx, sy, sw, sh)
+                    self._bind_overlay_owner(sid, _r)
                     js_eval(
                         f"window.dispatchEvent(new CustomEvent('service-woke',"
                         f"{{detail:{json.dumps(sid)}}}))"
@@ -359,6 +482,14 @@ class InkBossAPI:
             threading.Thread(target=_do, daemon=True).start()
             self._active_engine = "electron"
             self._bridge.active_id = sid
+            # 上の _hide_other_engine が積んだ _hide_all（Qt側で active_id=None に
+            # する）が後から実行されて active_id を消してしまい、Electron表示中の
+            # ウィンドウ移動・リサイズに追従しなくなる（Windowsで実機確認）。
+            # 同じキューの最後（_hide_allの後）で active_id を設定し直す。
+            self._bridge.run_on_gui_signal.emit(
+                lambda _sid=sid: setattr(self._bridge, "active_id", _sid)
+                if self._active_sid == _sid else None
+            )
             return
 
         # Qt
@@ -648,37 +779,34 @@ class InkBossAPI:
         print("[Close] soft watchdog armed (1200ms)", flush=True)
         print("[Close][Step 5/5] Soft watchdog armed end", flush=True)
     def minimize_window(self):
-        # 最小化前にオーバーレイを隠す
-        if self._electron and self._electron.is_available():
+        # 最小化前にオーバーレイを隠す。Windowsではオーナー窓の仕組みで
+        # Electronが Ink Boss と一緒に隠れ・戻るので、ここでは何もしない。
+        if (not winctl.IS_WINDOWS) and self._electron and self._electron.is_available():
             try:
                 self._electron.hide_all()
             except Exception:
                 pass
+        # Windowsでは最大化もネイティブで行っているので、最小化もネイティブに
+        # 揃える（Qt側のsetWindowStateと混ぜると復帰できなくなる）。
+        from bridge import get_win_id
+
+        win_id = get_win_id()
+        if win_id and winctl.minimize_window(win_id):
+            return
         if webview.windows:
             webview.windows[0].minimize()
 
     def toggle_maximize(self):
         # 以前は toggle_fullscreen() を使っていたため、画面全体を覆って
         # 上部パネルや下部ドックまで隠れていた。
-        # ウィンドウマネージャの「最大化」(_NET_WM_STATE_MAXIMIZED) を
-        # 切り替えることで、パネル/ドックを避けた作業領域に収める。
-        import subprocess
+        # ウィンドウマネージャの「最大化」を切り替えることで、パネル/ドックを
+        # 避けた作業領域に収める（実体は winctl.toggle_maximize）。
         from bridge import get_win_id
 
         win_id = get_win_id()
-        if win_id:
-            try:
-                r = subprocess.run(
-                    ["wmctrl", "-ir", win_id, "-b",
-                     "toggle,maximized_vert,maximized_horz"],
-                    capture_output=True, timeout=2,
-                    env=get_clean_subprocess_env(),
-                )
-                if r.returncode == 0:
-                    return
-            except Exception as e:
-                print(f"[toggle_maximize] wmctrl: {e}", flush=True)
-        # wmctrl が使えない場合のみ従来動作にフォールバック
+        if win_id and winctl.toggle_maximize(win_id):
+            return
+        # OS側の最大化が使えない場合のみ従来動作にフォールバック
         if webview.windows:
             webview.windows[0].toggle_fullscreen()
 
@@ -789,59 +917,33 @@ class InkBossAPI:
 
     def drag_start(self):
         """A1: TopBar ドラッグ。B1: ドラッグ中も Electron を追従。"""
-        import subprocess
         import time
-        from bridge import get_win_id, find_own_window_id
+        from bridge import get_win_id
 
         if self._dragging:
             return
 
-        # wmctrl/xdotoolはInk Boss自身のバイナリではない外部コマンドのため、
-        # PyInstaller由来のLD_LIBRARY_PATH等を取り除いた環境で呼ぶ
-        # （sysenv.py参照）。ドラッグループは60fps相当で呼ばれるため、
-        # ループの外で一度だけ作って使い回す。
-        clean_env = get_clean_subprocess_env()
-
         win_id = get_win_id()
         if not win_id:
             # タイトル一致だけでなく自プロセスのPID一致も要求する
-            # （bridge.find_own_window_idのdocstring参照。無関係な
+            # （winctl.find_own_window_idのdocstring参照。無関係な
             # 外部アプリのウィンドウを誤ってドラッグ対象として掴む
             # 実害のあるバグがあったため）。
-            win_id = find_own_window_id("Ink Boss")
+            win_id = winctl.find_own_window_id("Ink Boss")
         if not win_id:
             return
 
-        def _get_mouse_pos():
-            r = subprocess.run(
-                ["xdotool", "getmouselocation", "--shell"],
-                capture_output=True, text=True, env=clean_env,
-            )
-            x = y = 0
-            for line in r.stdout.splitlines():
-                if line.startswith("X="):
-                    x = int(line.split("=")[1])
-                elif line.startswith("Y="):
-                    y = int(line.split("=")[1])
-            return x, y
-
-        def _get_win_pos():
-            r = subprocess.run(
-                ["xdotool", "getwindowgeometry", "--shell", win_id],
-                capture_output=True,
-                text=True,
-                env=clean_env,
-            )
-            x = y = 0
-            for line in r.stdout.splitlines():
-                if line.startswith("X="):
-                    x = int(line.split("=")[1])
-                elif line.startswith("Y="):
-                    y = int(line.split("=")[1])
-            return x, y
-
-        mx0, my0 = _get_mouse_pos()
-        wx0, wy0 = _get_win_pos()
+        # マウス・ウィンドウ座標の取得と移動は winctl 経由（Linuxでは
+        # xdotool/wmctrl。外部コマンドなのでPyInstaller由来の環境汚染対策は
+        # winctl側でsysenv経由に統一してある）。
+        mouse0 = winctl.get_mouse_position()
+        win0 = winctl.get_window_position(win_id)
+        if mouse0 is None or win0 is None:
+            # この環境では座標が取れない（Windows実装前など）。取れない値を
+            # (0,0)として動かすとウィンドウが飛ぶため、ドラッグ自体を始めない。
+            return
+        mx0, my0 = mouse0
+        wx0, wy0 = win0
         self._dragging = True
         # ドラッグ中は Electron を一旦 hide するとズレが目立たないが、
         # B1 UX は「ついてくる」なので毎フレーム bounds 同期する。
@@ -849,19 +951,20 @@ class InkBossAPI:
         def _drag_loop():
             last_sync = 0.0
             while self._dragging:
-                mx, my = _get_mouse_pos()
+                pos = winctl.get_mouse_position()
+                if pos is None:
+                    time.sleep(0.016)
+                    continue
+                mx, my = pos
                 dx, dy = mx - mx0, my - my0
                 if dx != 0 or dy != 0:
-                    subprocess.run(
-                        ["wmctrl", "-ir", win_id, "-e", f"0,{wx0 + dx},{wy0 + dy},-1,-1"],
-                        check=False, env=clean_env,
-                    )
+                    winctl.move_window(win_id, wx0 + dx, wy0 + dy)
                     # pywebview window.x/y も更新（screen_rect 用）
                     try:
                         w = webview.windows[0] if webview.windows else None
                         if w is not None:
                             # 内部座標が古いままだと bounds がずれるので
-                            # xdotool の実座標を信頼して screen_rect 側で再計算
+                            # OS側の実座標を信頼して screen_rect 側で再計算
                             pass
                     except Exception:
                         pass
@@ -872,8 +975,9 @@ class InkBossAPI:
                 time.sleep(0.016)
             # ドラッグ終了後に最終同期
             try:
-                wx, wy = _get_win_pos()
-                self._sync_overlay_from_win_pos(wx, wy)
+                final = winctl.get_window_position(win_id)
+                if final is not None:
+                    self._sync_overlay_from_win_pos(*final)
             except Exception:
                 pass
 
@@ -909,27 +1013,14 @@ class InkBossAPI:
             pass
 
     def drag_window_by(self, dx, dy):
-        import subprocess
         from bridge import get_win_id
 
         win_id = get_win_id()
         if not win_id:
             return
-        clean_env = get_clean_subprocess_env()
-        pos = subprocess.run(
-            ["xdotool", "getwindowgeometry", "--shell", win_id],
-            capture_output=True,
-            text=True,
-            env=clean_env,
-        )
-        x = y = 0
-        for line in pos.stdout.splitlines():
-            if line.startswith("X="):
-                x = int(line.split("=")[1])
-            elif line.startswith("Y="):
-                y = int(line.split("=")[1])
-        subprocess.run(
-            ["wmctrl", "-ir", win_id, "-e", f"0,{x + int(dx)},{y + int(dy)},-1,-1"],
-            check=False, env=clean_env,
-        )
+        pos = winctl.get_window_position(win_id)
+        if pos is None:
+            return
+        x, y = pos
+        winctl.move_window(win_id, x + int(dx), y + int(dy))
         self._sync_overlay_from_win_pos(x + int(dx), y + int(dy))

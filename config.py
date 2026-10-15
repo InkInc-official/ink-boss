@@ -13,10 +13,12 @@ Ink Boss / Ink Inc.
 import json
 from pathlib import Path
 
+from platform_paths import config_dir
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # パス定数
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CONFIG_DIR   = Path.home() / ".config" / "ink-boss"
+CONFIG_DIR   = config_dir()   # Linux: ~/.config/ink-boss / Windows: %APPDATA%\ink-boss（platform_paths.py）
 CONFIG_FILE  = CONFIG_DIR / "config.json"
 SESSIONS_DIR = CONFIG_DIR / "sessions"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)

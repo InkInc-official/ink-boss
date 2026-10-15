@@ -8,6 +8,7 @@ JS↔Pythonのシグナル橋渡しもここで行う。
 
 import json
 import re
+import sys
 import threading
 import time
 import traceback
@@ -16,15 +17,15 @@ from PySide6.QtWebEngineCore import (
     QWebEngineProfile, QWebEnginePage, QWebEngineSettings, QWebEngineNewWindowRequest,
     QWebEngineScript, QWebEngineUrlRequestInterceptor
 )
-from PySide6.QtWidgets import QMenu
-from PySide6.QtCore import QObject, Signal, Slot, QTimer, QRect, Qt, QUrl
+from PySide6.QtWidgets import QMenu, QDialog
+from PySide6.QtCore import QObject, Signal, Slot, QTimer, QRect, Qt, QUrl, QEvent
 
+import winctl
 from config import SESSIONS_DIR, save_config
 from dialogs.settings     import show_settings_dialog
 from dialogs.add_service  import show_add_service_dialog
 from dialogs.add_group    import show_add_group_dialog
 from dialogs.context_menu import show_service_context_menu, show_group_context_menu
-from sysenv import get_clean_subprocess_env
 
 Q = Qt.ConnectionType.QueuedConnection
 
@@ -87,8 +88,11 @@ def _build_spoofed_user_agent() -> str:
         return _spoofed_user_agent
 
     version = _detect_chrome_version()
+    # OS部分は実際のOSに合わせる（navigator.userAgentData.platform等の実値と
+    # 食い違うとボット検知シグナルになるため）
+    _ua_os = "Windows NT 10.0; Win64; x64" if sys.platform == "win32" else "X11; Linux x86_64"
     _spoofed_user_agent = (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        f"Mozilla/5.0 ({_ua_os}) AppleWebKit/537.36 "
         f"(KHTML, like Gecko) Chrome/{version} Safari/537.36"
     )
     print(f"[bridge] 設定するUA文字列: {_spoofed_user_agent}", flush=True)
@@ -112,7 +116,10 @@ class _StealthRequestInterceptor(QWebEngineUrlRequestInterceptor):
     def interceptRequest(self, info):
         info.setHttpHeader(b"Sec-CH-UA", self._sec_ch_ua)
         info.setHttpHeader(b"Sec-CH-UA-Mobile", b"?0")
-        info.setHttpHeader(b"Sec-CH-UA-Platform", b'"Linux"')
+        info.setHttpHeader(
+            b"Sec-CH-UA-Platform",
+            b'"Windows"' if sys.platform == "win32" else b'"Linux"',
+        )
 
 
 _stealth_interceptor: "_StealthRequestInterceptor | None" = None
@@ -300,54 +307,8 @@ def get_win_id() -> str | None:
 
 
 def find_own_window_id(title_substr: str) -> str | None:
-    """`wmctrl -lp`の出力から、タイトルにtitle_substrを含み、かつ
-    実際に自プロセス(os.getpid())が所有するウィンドウのIDを返す。
-
-    以前はタイトルの部分一致だけ（`wmctrl -l`でtitle_substrを含む
-    最初の行を無条件採用）で判定しており、次の2パターンで無関係な
-    ウィンドウを「自分のウィンドウ」として誤って掴んでしまう実害の
-    あるバグがあった（いずれも実機で確認済み）:
-      1. Ink Bossを複数インスタンス同時起動した場合、後から起動した
-         方が先に起動していた別インスタンスのウィンドウを誤って掴む
-      2. 無関係な外部アプリ（例: 実Ecosiaブラウザ等）のウィンドウ
-         タイトルに、たまたまtitle_substrと同じ文字列が含まれていた
-         場合（例: ブラウザでInk Boss関連のページを開いている等）に、
-         そのアプリのウィンドウを誤って掴んでしまう。一度これが
-         起きると、以降そのウィンドウIDを使う全ての操作（IME用の
-         フォーカス強制、タイトルバードラッグでの移動）が、Ink Boss
-         自身ではなく無関係な外部アプリの方に対して実行され続ける
-         （実機で、コンテンツ領域に実Ecosiaブラウザが透けて見え、
-         ドラッグすると実Ecosiaブラウザが動く、という形で確認済み）。
-
-    自プロセス自身はサンドボックスされていないため_NET_WM_PIDは
-    常に正しいホスト側PIDを報告する（_get_own_window_ids/
-    main.pyの説明と同じ前提）。タイトル一致に加えてPID一致も
-    要求することで、上記どちらのケースも確実に排除できる。"""
-    import os
-    import subprocess
-    from sysenv import get_clean_subprocess_env
-
-    try:
-        result = subprocess.run(
-            ["wmctrl", "-lp"], capture_output=True, text=True,
-            env=get_clean_subprocess_env(), timeout=2.0,
-        )
-    except Exception:
-        return None
-    if result.returncode != 0:
-        return None
-    my_pid = os.getpid()
-    for line in result.stdout.splitlines():
-        parts = line.split(None, 3)
-        if len(parts) < 3:
-            continue
-        try:
-            win_pid = int(parts[2])
-        except ValueError:
-            continue
-        if win_pid == my_pid and title_substr in line:
-            return parts[0]
-    return None
+    """互換ラッパー。実体は winctl.find_own_window_id（docstringもそちら）。"""
+    return winctl.find_own_window_id(title_substr)
 
 
 class _CustomPage(QWebEnginePage):
@@ -410,10 +371,55 @@ class _CustomView(QWebEngineView):
         menu.popup(event.globalPos())
 
 
+class _DialogRaiser(QObject):
+    """トップレベルのダイアログが表示されたら、最前面に出してフォーカスを渡す。
+
+    Windowsでは、JS APIスレッド経由で開いたダイアログは「フォーカス奪取制限」で
+    Ink Bossの窓の裏に出ることがあり、モーダルのため本体が操作不能（警告音）に
+    なる。表示イベントを共通で捕まえて、前面化を保証する。"""
+
+    def eventFilter(self, obj, ev):
+        try:
+            if ev.type() == QEvent.Type.Show and isinstance(obj, QDialog) and obj.isWindow():
+                QTimer.singleShot(0, lambda o=obj: _raise_dialog(o))
+        except Exception:
+            pass
+        return False
+
+
+def _raise_dialog(dlg) -> None:
+    try:
+        if not dlg.isVisible():
+            return
+        # Qt標準の前面化のみ。OSの入力キューを他プロセスのスレッドへ接続する
+        # 方式（winctl.activate_window）は、GUIスレッドから呼ぶとElectron表示中に
+        # 固まる／落ちる恐れがあるため使わない。
+        dlg.raise_()
+        dlg.activateWindow()
+    except Exception as e:
+        print(f"[dialog-raise] {e}", flush=True)
+
+
+_dialog_raiser: _DialogRaiser | None = None
+
+
+def install_dialog_raiser(qt_app) -> None:
+    # Windowsのみ。Linuxは既存の前面化処理（wmctrl等）・日本語入力との干渉を
+    # 避けるため、Linuxでの確認が取れるまで有効にしない。
+    if sys.platform != "win32":
+        return
+    global _dialog_raiser
+    if _dialog_raiser is None:
+        _dialog_raiser = _DialogRaiser(qt_app)
+        qt_app.installEventFilter(_dialog_raiser)
+
+
 class ViewBridge(QObject):
     # ─── シグナル定義 ───
     create_view_signal      = Signal(str, str)
     show_view_signal        = Signal(str, int, int, int, int)
+    # 表示済みビューの位置・大きさだけを更新する（フォーカス移動などはしない）
+    set_view_geometry_signal = Signal(str, int, int, int, int)
     hide_all_signal         = Signal()
     remove_view_signal      = Signal(str)
     reload_view_signal      = Signal(str)
@@ -434,6 +440,10 @@ class ViewBridge(QObject):
     # バックグラウンドスレッド（stdout読み取り）から呼ばれるため、
     # ダイアログ表示をQtメインスレッドへ安全に渡すのに使う。
     electron_add_service_signal = Signal(str)
+    # 任意の関数をQt GUIスレッドで実行する（pywebviewのワーカースレッド等から
+    # Qtウィジェットを触る必要があるときに使う。Windowsでは非GUIスレッドからの
+    # ウィジェット操作がデッドロックする）
+    run_on_gui_signal = Signal(object)
 
     def __init__(self, qt_app, config: dict):
         super().__init__()
@@ -457,6 +467,7 @@ class ViewBridge(QObject):
         # シグナル接続
         self.create_view_signal.connect(self._create_view, Q)
         self.show_view_signal.connect(self._show_view, Q)
+        self.set_view_geometry_signal.connect(self._set_view_geometry, Q)
         self.hide_all_signal.connect(self._hide_all, Q)
         self.remove_view_signal.connect(self._remove_view, Q)
         self.reload_view_signal.connect(self._reload_view, Q)
@@ -471,8 +482,30 @@ class ViewBridge(QObject):
         self.add_group_signal.connect(self._add_group, Q)
         self.del_group_signal.connect(self._del_group, Q)
         self.init_views_signal.connect(self._init_views, Q)
+        self.run_on_gui_signal.connect(self._run_on_gui, Q)
         self.app_shutdown_signal.connect(self._on_app_shutdown, Q)
         self.electron_add_service_signal.connect(self.open_add_service_with_url, Q)
+
+        # Electronのサービスを表示中は、Qtのビューが残っていたら隠す見張り。
+        # （最小化→復帰などで、隠したはずのQtビューが古い位置・大きさのまま
+        # 再表示され、Electron画面やAideの下・横に見えてしまうことへの保険）
+        self.engine_getter = None  # callable → "electron" / "qt" / None（apiが設定）
+        self._guard_timer = QTimer(self)
+        self._guard_timer.setInterval(150)
+        self._guard_timer.timeout.connect(self._guard_tick)
+        if sys.platform == "win32":  # Linuxでは、確認が取れるまで動かさない
+            self._guard_timer.start()
+
+    def _guard_tick(self) -> None:
+        try:
+            if not self.engine_getter or self.engine_getter() != "electron":
+                return
+            for s, v in self.views.items():
+                if v.isVisible():
+                    print(f"[guard] stray qt view hidden: {s}", flush=True)
+                    v.hide()
+        except Exception as e:
+            print(f"[guard] {e}", flush=True)
 
     def set_shutdown_handler(self, fn) -> None:
         """終了処理コールバック（Qt メインスレッドで実行される）。"""
@@ -507,6 +540,13 @@ class ViewBridge(QObject):
                 continue
             print(f"[_init_views] emit create_view: {svc['id']}", flush=True)
             self.create_view_signal.emit(svc["id"], svc["url"])
+
+    @Slot(object)
+    def _run_on_gui(self, fn):
+        try:
+            fn()
+        except Exception as e:
+            print(f"[run_on_gui] {e}", flush=True)
 
     def set_container(self, widget):
         self.container = widget
@@ -674,21 +714,26 @@ class ViewBridge(QObject):
         view.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         for child in view.findChildren(type(view)):
             child.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-        # IME有効化：X11フォーカスをメインウィンドウに移す
+        # IME有効化：OSのフォーカスをメインウィンドウに移す（実体はwinctl）
         wid = get_win_id()
         if wid:
-            import subprocess
             def _force_focus(wid_hex):
                 import time as _t
-                clean_env = get_clean_subprocess_env()
                 _t.sleep(0.2)
-                subprocess.run(["wmctrl", "-ia", wid_hex], check=False, capture_output=True, env=clean_env)
+                winctl.activate_window(wid_hex)
                 _t.sleep(0.1)
-                subprocess.run(["fcitx5-remote", "-o"], check=False, capture_output=True, env=clean_env)
-                print(f"[TIMING2] {time.time():.3f} _show_view({sid}): _force_focus thread done (wmctrl+fcitx5-remote)", flush=True)
+                winctl.ime_enable()
+                print(f"[TIMING2] {time.time():.3f} _show_view({sid}): _force_focus thread done (activate_window+ime_enable)", flush=True)
             threading.Thread(target=_force_focus, args=(wid,), daemon=True).start()
         self.active_id = sid
         print(f"[TIMING2] {time.time():.3f} _show_view({sid}) SLOT EXIT, active_id={self.active_id}", flush=True)
+
+    @Slot(str, int, int, int, int)
+    def _set_view_geometry(self, sid: str, x: int, y: int, w: int, h: int):
+        view = self.views.get(sid)
+        if view is None or not view.isVisible():
+            return
+        view.setGeometry(QRect(x, y, w, h))
 
     @Slot()
     def _hide_all(self):
@@ -857,8 +902,20 @@ class ViewBridge(QObject):
         electron = getattr(self, "electron", None)
         was_shown = bool(electron and electron.is_shown)
         prev_sid = electron.active_sid if was_shown else None
+        hide_thread = None
         if was_shown:
-            electron.hide_all()
+            # 【重要】この関数はQtのGUIスレッドで呼ばれる。ここでElectronへHTTPで
+            # 同期的に頼んで応答を待つと、Windowsでは固まる（デッドロック）:
+            #   ElectronはInk Bossを「オーナー窓」にしており、窓を隠す／表示する
+            #   操作の際にOSがオーナー（=このGUIスレッド）へ同期メッセージを送る。
+            #   GUIスレッドがHTTP応答待ちで止まっていると、お互いに待ち合って
+            #   タイムアウトするまで（十数秒）操作不能になる。
+            # そのため通信は背景スレッドで行い、GUIスレッドは待たない。
+            if sys.platform == "win32":
+                hide_thread = threading.Thread(target=electron.hide_all, daemon=True)
+                hide_thread.start()
+            else:
+                electron.hide_all()  # Linuxは従来どおり同期処理
 
         def restore() -> None:
             if not (was_shown and prev_sid):
@@ -866,8 +923,23 @@ class ViewBridge(QObject):
             svc = next((s for s in self.config.get("services", []) if s["id"] == prev_sid), None)
             still_electron = svc is not None and (svc.get("engine") or "qt").lower() in ("electron", "e")
             still_current = self.active_id in (prev_sid, None)
-            if still_electron and still_current and not electron.is_shown:
-                electron.show(prev_sid, "", 0, 0, 0, 0)
+            if not (still_electron and still_current):
+                return
+
+            if sys.platform != "win32":
+                # Linuxは従来どおり同期処理
+                if not electron.is_shown:
+                    electron.show(prev_sid, "", 0, 0, 0, 0)
+                return
+
+            def _bg() -> None:
+                # 隠す処理が終わってから表示し直す（順序を守る）
+                if hide_thread is not None:
+                    hide_thread.join(timeout=5.0)
+                if not electron.is_shown:
+                    electron.show(prev_sid, "", 0, 0, 0, 0)
+
+            threading.Thread(target=_bg, daemon=True).start()
 
         return restore
 

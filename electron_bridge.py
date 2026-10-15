@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sysenv import get_clean_subprocess_env
+from winctl import descendant_pids
 
 def _resolve_base_dir() -> Path:
     """electron-engine/ を探す基準ディレクトリ。
@@ -149,27 +150,8 @@ def _read_ppid(pid: int) -> int | None:
         return None
 
 
-def _descendant_pids(root_pid: int) -> set[int]:
-    """root_pid自身とその子孫プロセスのPID集合（main.py の同名関数と同じ考え方）。"""
-    children_map: dict[int, list[int]] = {}
-    try:
-        for entry in os.listdir("/proc"):
-            if not entry.isdigit():
-                continue
-            ppid = _read_ppid(int(entry))
-            if ppid is not None:
-                children_map.setdefault(ppid, []).append(int(entry))
-    except OSError:
-        return {root_pid}
-    result = {root_pid}
-    stack = [root_pid]
-    while stack:
-        p = stack.pop()
-        for c in children_map.get(p, []):
-            if c not in result:
-                result.add(c)
-                stack.append(c)
-    return result
+# 子孫PID探索は winctl に集約した（旧: ここと main.py に同じ関数が重複していた）。
+_descendant_pids = descendant_pids
 
 
 # 【デバッグ専用・調査完了後に削除】IME(fcitx5)不具合の切り分け用。
@@ -260,6 +242,48 @@ def _gather_process_diagnostics(root_pid: int) -> str:
 # （dbus-send・Electron・curlと3回同じ構造のバグを踏んだ末に共通化した）。
 
 
+def _cleanup_orphaned_electron_windows() -> None:
+    """Windows版の孤児Electron掃除。このアプリ同梱の electron.exe
+    （ENGINE_DIR\\node_modules\\electron\\dist 配下）だけを対象にする。
+    メインプロセス＝親が同じ electron.exe ではないもの。その親が既に
+    存在しなければ孤児として、配下ごと強制終了する。親が生きている
+    （＝別の現行Ink Bossが動作中）ものは触らない。"""
+    import time as _time
+    import winctl
+
+    try:
+        dist = os.path.normcase(os.path.normpath(
+            str(ENGINE_DIR / "node_modules" / "electron" / "dist")))
+        procs = winctl.list_processes()
+        if not procs:
+            return
+        alive = {pid for pid, _pp, _n in procs}
+        ours: set[int] = set()
+        for pid, _pp, name in procs:
+            if name.lower() != "electron.exe":
+                continue
+            img = winctl.process_image_path(pid)
+            if img and os.path.normcase(os.path.dirname(os.path.normpath(img))) == dist:
+                ours.add(pid)
+        orphan_roots = [
+            pid for pid, pp, _n in procs
+            if pid in ours and pp not in ours and pp not in alive
+        ]
+        if not orphan_roots:
+            return
+        targets: set[int] = set()
+        for root in orphan_roots:
+            targets |= winctl.descendant_pids(root)
+        targets &= ours | set(orphan_roots)
+        print(f"[ElectronEngine] cleanup: found orphaned electron-engine process tree {sorted(targets)}", flush=True)
+        for pid in targets:
+            ok = winctl.terminate_pid(pid)
+            print(f"[ElectronEngine] cleanup: terminate {pid} -> {'ok' if ok else 'failed'}", flush=True)
+        _time.sleep(0.5)  # userDataロックの解放待ち
+    except Exception as e:
+        print(f"[ElectronEngine] cleanup: Windows cleanup error: {e}", flush=True)
+
+
 def cleanup_orphaned_electron_processes() -> None:
     """前回の異常終了（Qt側クラッシュ・SIGKILL・ハードウォッチドッグの
     os._exit等）でElectronヘルパーの終了処理が走らなかった場合、
@@ -274,6 +298,11 @@ def cleanup_orphaned_electron_processes() -> None:
     ツリーごと終了させる。まだ生きている親を持つプロセス（＝今まさに
     動いている別のInk Bossインスタンス）は誤って巻き込まないよう、
     対象から除外する。"""
+    if sys.platform == "win32":
+        _cleanup_orphaned_electron_windows()
+        return
+    if not sys.platform.startswith("linux"):
+        return
     marker = str(ENGINE_DIR / "main.js")
     try:
         pids = [int(e) for e in os.listdir("/proc") if e.isdigit()]
@@ -491,7 +520,7 @@ class ElectronEngine:
                 if len(self._stderr_tail) > 40:
                     self._stderr_tail = self._stderr_tail[-40:]
                 low = line.lower()
-                if any(k in low for k in ("error", "fail", "ready", "listening", "created", "shutdown", "quit", "crash", "recover")):
+                if any(k in low for k in ("error", "fail", "ready", "listening", "created", "shutdown", "quit", "crash", "recover", "applybounds")):
                     print(f"[electron-engine:err] {line}", flush=True)
         except Exception:
             pass
