@@ -267,6 +267,26 @@ function hideAllExcept(keepSid = null) {
   if (!keepSid) activeId = null;
 }
 
+// サイズ・位置の変更が落ち着いたあと（最後の変更から一定時間後）に、
+// 同じ値を再適用して強制的に再描画させる。
+// Windowsでは、最大化⇄元のサイズの切り替え直後などにsetBoundsを連続で
+// 受けると、Electronの画面が再描画されず真っ暗なまま残ることがある
+// （サイドバーから選び直すと、同じboundsの再適用で描画が戻る）。
+function repaintSoon(win, b) {
+  if (process.platform !== "win32") return;
+  if (win.__settleTimer) clearTimeout(win.__settleTimer);
+  win.__settleTimer = setTimeout(() => {
+    win.__settleTimer = null;
+    try {
+      if (win.isDestroyed() || !win.isVisible()) return;
+      win.setBounds(b);
+      if (typeof win.webContents.invalidate === "function") {
+        win.webContents.invalidate();
+      }
+    } catch (_) {}
+  }, 150);
+}
+
 function applyBounds(win, bounds) {
   const { x, y, w, h } = bounds || {};
   if (
@@ -277,12 +297,14 @@ function applyBounds(win, bounds) {
     w > 1 &&
     h > 1
   ) {
-    win.setBounds({
+    const b = {
       x: Math.round(x),
       y: Math.round(y),
       width: Math.round(w),
       height: Math.round(h),
-    });
+    };
+    win.setBounds(b);
+    repaintSoon(win, b);
     if (process.env.INK_BOSS_WINDEBUG) {
       // 【診断用】要求したboundsと、実際に反映されたboundsを比較する
       const got = win.getBounds();

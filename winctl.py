@@ -485,7 +485,17 @@ def set_window_owner(child_hwnd, owner_win_id) -> bool:
             return False
         u = _w().user32
         u.SetWindowLongPtrW(child, -8, owner)
-        return int(u.GetWindowLongPtrW(child, -8)) == owner
+        ok = int(u.GetWindowLongPtrW(child, -8)) == owner
+        if ok:
+            # オーナーを変えただけでは、OSは前後関係(z順)を再計算しない。
+            # 初回表示のように「オーナー設定前に表示済み」だと、Ink Boss本体の
+            # 裏に隠れたまま残る（別サービスへ移って戻るまで出ない）ため、
+            # 位置・大きさ・フォーカスは変えずに、z順だけ最前面（HWND_TOP=None）へ。
+            u.SetWindowPos(
+                child, None, 0, 0, 0, 0,
+                _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE,
+            )
+        return ok
     except Exception:
         return False
 

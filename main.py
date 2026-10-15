@@ -13,6 +13,37 @@ Ink Boss / Ink Inc.
 import os
 import sys
 
+def _setup_stdio() -> None:
+    """標準出力・標準エラーを、日本語（cp932にない文字を含む）でも落ちないようにする。
+
+    ・exe（PyInstaller）で起動したWindows版: コンソールが無いため、ログを
+      %APPDATA%\\ink-boss\\ink-boss.log へUTF-8で書く（不具合調査用）。
+      以前は終了時の print に含まれる「—」がcp932で書けず、終了時にエラー
+      ダイアログが出ていた。
+    ・それ以外: 文字が書けなくても落ちないよう errors="replace" にする。"""
+    try:
+        if getattr(sys, "frozen", False) and sys.platform == "win32":
+            from platform_paths import config_dir
+            d = config_dir()
+            d.mkdir(parents=True, exist_ok=True)
+            lp = d / "ink-boss.log"
+            if lp.exists() and lp.stat().st_size > 5 * 1024 * 1024:
+                lp.replace(d / "ink-boss.log.old")
+            f = open(lp, "a", encoding="utf-8", errors="replace", buffering=1)
+            sys.stdout = f
+            sys.stderr = f
+            import time as _time
+            print(f"\n===== Ink Boss 起動 {_time.strftime('%Y-%m-%d %H:%M:%S')} =====", flush=True)
+        else:
+            for _s in (sys.stdout, sys.stderr):
+                if _s is not None and hasattr(_s, "reconfigure"):
+                    _s.reconfigure(errors="replace")
+    except Exception:
+        pass
+
+
+_setup_stdio()
+
 # QtPy(pywebview)がPyQt6ではなくPySide6を選ぶように固定（両方入っていても衝突しない）
 os.environ.setdefault("QT_API", "pyside6")
 
@@ -45,7 +76,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, QTimer
 
 from config import load_config, save_config
-from bridge import ViewBridge
+from bridge import ViewBridge, install_dialog_raiser
 from api    import InkBossAPI
 from window import on_shown, get_rect, get_screen_rect
 from electron_bridge import ElectronEngine
@@ -55,6 +86,7 @@ import winctl
 # QApplication
 log_ime_env("Qt本体（QApplication生成直前。QtWebEngineProcessもこの環境を継承）")
 qt_app = QApplication.instance() or QApplication(sys.argv)
+install_dialog_raiser(qt_app)
 icon_path = Path(__file__).parent / "frontend" / "public" / "icon.png"
 if icon_path.exists():
     qt_app.setWindowIcon(QIcon(str(icon_path)))
@@ -246,6 +278,7 @@ def main():
     )
     api.start_auto_hibernate()
     api.start_overlay_follower()
+    bridge.engine_getter = lambda: api._active_engine
     # 終了は bridge シグナル経由で Qt メインスレッド実行
     bridge.set_shutdown_handler(api._shutdown_for_exit)
     _orig_set = api.set_aide_width

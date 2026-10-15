@@ -17,8 +17,8 @@ from PySide6.QtWebEngineCore import (
     QWebEngineProfile, QWebEnginePage, QWebEngineSettings, QWebEngineNewWindowRequest,
     QWebEngineScript, QWebEngineUrlRequestInterceptor
 )
-from PySide6.QtWidgets import QMenu
-from PySide6.QtCore import QObject, Signal, Slot, QTimer, QRect, Qt, QUrl
+from PySide6.QtWidgets import QMenu, QDialog
+from PySide6.QtCore import QObject, Signal, Slot, QTimer, QRect, Qt, QUrl, QEvent
 
 import winctl
 from config import SESSIONS_DIR, save_config
@@ -371,6 +371,45 @@ class _CustomView(QWebEngineView):
         menu.popup(event.globalPos())
 
 
+class _DialogRaiser(QObject):
+    """トップレベルのダイアログが表示されたら、最前面に出してフォーカスを渡す。
+
+    Windowsでは、JS APIスレッド経由で開いたダイアログは「フォーカス奪取制限」で
+    Ink Bossの窓の裏に出ることがあり、モーダルのため本体が操作不能（警告音）に
+    なる。表示イベントを共通で捕まえて、前面化を保証する。"""
+
+    def eventFilter(self, obj, ev):
+        try:
+            if ev.type() == QEvent.Type.Show and isinstance(obj, QDialog) and obj.isWindow():
+                QTimer.singleShot(0, lambda o=obj: _raise_dialog(o))
+        except Exception:
+            pass
+        return False
+
+
+def _raise_dialog(dlg) -> None:
+    try:
+        if not dlg.isVisible():
+            return
+        # Qt標準の前面化のみ。OSの入力キューを他プロセスのスレッドへ接続する
+        # 方式（winctl.activate_window）は、GUIスレッドから呼ぶとElectron表示中に
+        # 固まる／落ちる恐れがあるため使わない。
+        dlg.raise_()
+        dlg.activateWindow()
+    except Exception as e:
+        print(f"[dialog-raise] {e}", flush=True)
+
+
+_dialog_raiser: _DialogRaiser | None = None
+
+
+def install_dialog_raiser(qt_app) -> None:
+    global _dialog_raiser
+    if _dialog_raiser is None:
+        _dialog_raiser = _DialogRaiser(qt_app)
+        qt_app.installEventFilter(_dialog_raiser)
+
+
 class ViewBridge(QObject):
     # ─── シグナル定義 ───
     create_view_signal      = Signal(str, str)
@@ -442,6 +481,26 @@ class ViewBridge(QObject):
         self.run_on_gui_signal.connect(self._run_on_gui, Q)
         self.app_shutdown_signal.connect(self._on_app_shutdown, Q)
         self.electron_add_service_signal.connect(self.open_add_service_with_url, Q)
+
+        # Electronのサービスを表示中は、Qtのビューが残っていたら隠す見張り。
+        # （最小化→復帰などで、隠したはずのQtビューが古い位置・大きさのまま
+        # 再表示され、Electron画面やAideの下・横に見えてしまうことへの保険）
+        self.engine_getter = None  # callable → "electron" / "qt" / None（apiが設定）
+        self._guard_timer = QTimer(self)
+        self._guard_timer.setInterval(150)
+        self._guard_timer.timeout.connect(self._guard_tick)
+        self._guard_timer.start()
+
+    def _guard_tick(self) -> None:
+        try:
+            if not self.engine_getter or self.engine_getter() != "electron":
+                return
+            for s, v in self.views.items():
+                if v.isVisible():
+                    print(f"[guard] stray qt view hidden: {s}", flush=True)
+                    v.hide()
+        except Exception as e:
+            print(f"[guard] {e}", flush=True)
 
     def set_shutdown_handler(self, fn) -> None:
         """終了処理コールバック（Qt メインスレッドで実行される）。"""
@@ -838,8 +897,17 @@ class ViewBridge(QObject):
         electron = getattr(self, "electron", None)
         was_shown = bool(electron and electron.is_shown)
         prev_sid = electron.active_sid if was_shown else None
+        hide_thread = None
         if was_shown:
-            electron.hide_all()
+            # 【重要】この関数はQtのGUIスレッドで呼ばれる。ここでElectronへHTTPで
+            # 同期的に頼んで応答を待つと、Windowsでは固まる（デッドロック）:
+            #   ElectronはInk Bossを「オーナー窓」にしており、窓を隠す／表示する
+            #   操作の際にOSがオーナー（=このGUIスレッド）へ同期メッセージを送る。
+            #   GUIスレッドがHTTP応答待ちで止まっていると、お互いに待ち合って
+            #   タイムアウトするまで（十数秒）操作不能になる。
+            # そのため通信は背景スレッドで行い、GUIスレッドは待たない。
+            hide_thread = threading.Thread(target=electron.hide_all, daemon=True)
+            hide_thread.start()
 
         def restore() -> None:
             if not (was_shown and prev_sid):
@@ -847,8 +915,17 @@ class ViewBridge(QObject):
             svc = next((s for s in self.config.get("services", []) if s["id"] == prev_sid), None)
             still_electron = svc is not None and (svc.get("engine") or "qt").lower() in ("electron", "e")
             still_current = self.active_id in (prev_sid, None)
-            if still_electron and still_current and not electron.is_shown:
-                electron.show(prev_sid, "", 0, 0, 0, 0)
+            if not (still_electron and still_current):
+                return
+
+            def _bg() -> None:
+                # 隠す処理が終わってから表示し直す（順序を守る）
+                if hide_thread is not None:
+                    hide_thread.join(timeout=5.0)
+                if not electron.is_shown:
+                    electron.show(prev_sid, "", 0, 0, 0, 0)
+
+            threading.Thread(target=_bg, daemon=True).start()
 
         return restore
 
