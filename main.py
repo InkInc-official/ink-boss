@@ -13,6 +13,9 @@ Ink Boss / Ink Inc.
 import os
 import sys
 
+# QtPy(pywebview)がPyQt6ではなくPySide6を選ぶように固定（両方入っていても衝突しない）
+os.environ.setdefault("QT_API", "pyside6")
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # IME設定：すべてのimport・QApplication生成より前に必須
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

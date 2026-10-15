@@ -655,6 +655,13 @@ class InkBossAPI:
                 self._electron.hide_all()
             except Exception:
                 pass
+        # Windowsでは最大化もネイティブで行っているので、最小化もネイティブに
+        # 揃える（Qt側のsetWindowStateと混ぜると復帰できなくなる）。
+        from bridge import get_win_id
+
+        win_id = get_win_id()
+        if win_id and winctl.minimize_window(win_id):
+            return
         if webview.windows:
             webview.windows[0].minimize()
 

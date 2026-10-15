@@ -9,10 +9,13 @@ Ink Boss / Ink Inc.
                 各ファイルのコードをそのまま移したもの（動作は変えない）。
                 外部コマンドは必ず sysenv.get_clean_subprocess_env() 経由で
                 呼ぶ（詳細は sysenv.py のdocstring）。
-  Windows     : 【未実装】(2)の段階では入口だけ。各関数に TODO(win) を置いてあり、
-                手順(4)でctypes(user32)による実装を入れる。未実装の間は
-                「何もしない／取得できなかった(None・False・空集合)」を返すので、
-                呼び出し側は None/False を必ず許容すること。
+  Windows     : ctypes(user32 / kernel32)で実装。追加の依存パッケージは不要。
+                ウィンドウIDは HWND を str(hwnd)(文字列ID) / int(hwnd)(集合・
+                アクティブ窓) で返す。座標は物理ピクセル（QtはPer-Monitor DPI Aware
+                で動くため、GetWindowRect/GetCursorPos/SetWindowPosが同じ座標系で
+                揃う。ドラッグ移動のような「差分」の計算はそのまま成立する）。
+                取得できない時は None・False・空集合を返すので、呼び出し側は
+                None/False を必ず許容すること。
   その他(macOS等): 対象外。Windowsと同じ「未実装」扱い。
 
 ウィンドウIDは呼び出し側との互換のため、これまでと同じ型を保つ:
@@ -36,6 +39,157 @@ from sysenv import get_clean_subprocess_env
 
 IS_LINUX = sys.platform.startswith("linux")
 IS_WINDOWS = sys.platform == "win32"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 内部ヘルパー（Windows / ctypes）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_win_api = None
+
+
+def _w():
+    """user32/kernel32 を型付きで初期化して返す（初回のみ。Windows以外では呼ばない）。
+    HWND/HANDLEは64bitでは64bit幅。argtypes/restypeを指定しないとctypesが
+    32bit intとして扱い、ハンドルが壊れる。"""
+    global _win_api
+    if _win_api is not None:
+        return _win_api
+    import ctypes
+    from ctypes import wintypes as wt
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+    user32.EnumWindows.argtypes = [WNDENUMPROC, wt.LPARAM]
+    user32.EnumWindows.restype = wt.BOOL
+    user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wt.DWORD
+    user32.GetWindowTextLengthW.argtypes = [wt.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    user32.IsWindowVisible.argtypes = [wt.HWND]
+    user32.IsWindowVisible.restype = wt.BOOL
+    user32.IsWindow.argtypes = [wt.HWND]
+    user32.IsWindow.restype = wt.BOOL
+    user32.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
+    user32.GetWindowRect.restype = wt.BOOL
+    user32.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
+    user32.GetCursorPos.restype = wt.BOOL
+    user32.SetWindowPos.argtypes = [
+        wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, wt.UINT,
+    ]
+    user32.SetWindowPos.restype = wt.BOOL
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = wt.HWND
+    user32.IsZoomed.argtypes = [wt.HWND]
+    user32.IsZoomed.restype = wt.BOOL
+    user32.IsIconic.argtypes = [wt.HWND]
+    user32.IsIconic.restype = wt.BOOL
+    user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = wt.BOOL
+    user32.SetForegroundWindow.argtypes = [wt.HWND]
+    user32.SetForegroundWindow.restype = wt.BOOL
+    user32.BringWindowToTop.argtypes = [wt.HWND]
+    user32.BringWindowToTop.restype = wt.BOOL
+    user32.AttachThreadInput.argtypes = [wt.DWORD, wt.DWORD, wt.BOOL]
+    user32.AttachThreadInput.restype = wt.BOOL
+    user32.GetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int]
+    user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user32.SetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    kernel32.GetCurrentThreadId.argtypes = []
+    kernel32.GetCurrentThreadId.restype = wt.DWORD
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wt.DWORD),
+            ("cntUsage", wt.DWORD),
+            ("th32ProcessID", wt.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wt.DWORD),
+            ("cntThreads", wt.DWORD),
+            ("th32ParentProcessID", wt.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wt.DWORD),
+            ("szExeFile", wt.WCHAR * 260),
+        ]
+
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wt.HANDLE
+    kernel32.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32FirstW.restype = wt.BOOL
+    kernel32.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.restype = wt.BOOL
+    kernel32.CloseHandle.argtypes = [wt.HANDLE]
+    kernel32.CloseHandle.restype = wt.BOOL
+
+    class _Api:
+        pass
+
+    api = _Api()
+    api.ctypes = ctypes
+    api.wt = wt
+    api.user32 = user32
+    api.kernel32 = kernel32
+    api.WNDENUMPROC = WNDENUMPROC
+    api.PROCESSENTRY32W = PROCESSENTRY32W
+    _win_api = api
+    return api
+
+
+def _win_enum_windows() -> list[tuple[int, int]]:
+    """全トップレベル窓を (hwnd, 所有PID) のリストで返す。"""
+    a = _w()
+    out: list[tuple[int, int]] = []
+
+    def _cb(hwnd, _lparam):
+        pid = a.wt.DWORD(0)
+        a.user32.GetWindowThreadProcessId(hwnd, a.ctypes.byref(pid))
+        out.append((int(hwnd), int(pid.value)))
+        return True
+
+    a.user32.EnumWindows(a.WNDENUMPROC(_cb), 0)
+    return out
+
+
+def _win_title(hwnd: int) -> str:
+    a = _w()
+    n = a.user32.GetWindowTextLengthW(hwnd)
+    if n <= 0:
+        return ""
+    buf = a.ctypes.create_unicode_buffer(n + 1)
+    a.user32.GetWindowTextW(hwnd, buf, n + 1)
+    return buf.value
+
+
+def _win_hwnd(win_id) -> int | None:
+    """呼び出し側のID（str/int）→ HWND(int)。不正・存在しない窓なら None。"""
+    try:
+        hwnd = int(win_id)
+    except (TypeError, ValueError):
+        return None
+    if not hwnd or not _w().user32.IsWindow(hwnd):
+        return None
+    return hwnd
+
+
+# SetWindowPos / ShowWindow の定数
+_SWP_NOSIZE = 0x0001
+_SWP_NOZORDER = 0x0004
+_SWP_NOACTIVATE = 0x0010
+_SWP_NOMOVE = 0x0002
+_SWP_FRAMECHANGED = 0x0020
+_GWL_STYLE = -16
+_WS_MAXIMIZEBOX = 0x00010000
+_WS_MINIMIZEBOX = 0x00020000
+_WS_SYSMENU = 0x00080000
+_SW_RESTORE = 9
+_SW_MAXIMIZE = 3
+_SW_MINIMIZE = 6
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -116,7 +270,39 @@ def descendant_pids(root_pid: int) -> set[int]:
                     stack.append(c)
         return result
 
-    # TODO(win): CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS) で親子関係を辿る。
+    if IS_WINDOWS:
+        try:
+            a = _w()
+            TH32CS_SNAPPROCESS = 0x00000002
+            snap = a.kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            if not snap or int(snap) == -1:
+                return {root_pid}
+            children_map: dict[int, list[int]] = {}
+            try:
+                entry = a.PROCESSENTRY32W()
+                entry.dwSize = a.ctypes.sizeof(a.PROCESSENTRY32W)
+                ok = a.kernel32.Process32FirstW(snap, a.ctypes.byref(entry))
+                while ok:
+                    children_map.setdefault(
+                        int(entry.th32ParentProcessID), []
+                    ).append(int(entry.th32ProcessID))
+                    ok = a.kernel32.Process32NextW(snap, a.ctypes.byref(entry))
+            finally:
+                a.kernel32.CloseHandle(snap)
+        except Exception:
+            return {root_pid}
+        # PIDは再利用される（親が死んだ後に別プロセスが同じPIDを得る）ので、
+        # 自分自身を再訪しないよう visited で打ち切る。
+        result = {root_pid}
+        stack = [root_pid]
+        while stack:
+            p = stack.pop()
+            for c in children_map.get(p, []):
+                if c not in result:
+                    result.add(c)
+                    stack.append(c)
+        return result
+
     return {root_pid}
 
 
@@ -142,8 +328,18 @@ def find_own_window_id(title_substr: str) -> str | None:
                 return win_id
         return None
 
-    # TODO(win): EnumWindows + GetWindowThreadProcessId + GetWindowTextW。
-    #            QtのwinId()を使えるならそちらの方が確実（タイトル検索不要）。
+    if IS_WINDOWS:
+        try:
+            my_pid = os.getpid()
+            a = _w()
+            for hwnd, pid in _win_enum_windows():
+                if pid != my_pid or not a.user32.IsWindowVisible(hwnd):
+                    continue
+                if title_substr in _win_title(hwnd):
+                    return str(hwnd)
+        except Exception:
+            pass
+        return None
     return None
 
 
@@ -172,8 +368,14 @@ def get_own_window_ids(root_pids: set[int]) -> set[int]:
                 own_ids.add(win_id_int)
         return own_ids
 
-    # TODO(win): EnumWindows で全トップレベル窓を列挙し、所有PIDが all_descendants に
-    #            含まれるHWNDを集める。
+    if IS_WINDOWS:
+        try:
+            return {
+                hwnd for hwnd, pid in _win_enum_windows()
+                if pid in all_descendants
+            }
+        except Exception:
+            return set()
     return set()
 
 
@@ -197,7 +399,12 @@ def get_active_window_id() -> int | None:
             pass
         return None
 
-    # TODO(win): GetForegroundWindow()
+    if IS_WINDOWS:
+        try:
+            hwnd = _w().user32.GetForegroundWindow()
+            return int(hwnd) if hwnd else None
+        except Exception:
+            return None
     return None
 
 
@@ -220,8 +427,18 @@ def get_window_position(win_id: str, timeout: float | None = None) -> tuple[int,
             return None
         return x, y
 
-    # TODO(win): GetWindowRect(hwnd)。DPIスケーリング時はPer-Monitor DPI Aware前提で
-    #            Qt/pywebview/Electronの座標系（物理px or 論理px）を揃えること。
+    if IS_WINDOWS:
+        try:
+            hwnd = _win_hwnd(win_id)
+            if hwnd is None:
+                return None
+            a = _w()
+            rect = a.wt.RECT()
+            if not a.user32.GetWindowRect(hwnd, a.ctypes.byref(rect)):
+                return None
+            return int(rect.left), int(rect.top)
+        except Exception:
+            return None
     return None
 
 
@@ -241,7 +458,15 @@ def get_mouse_position() -> tuple[int, int] | None:
             return None
         return x, y
 
-    # TODO(win): GetCursorPos
+    if IS_WINDOWS:
+        try:
+            a = _w()
+            pt = a.wt.POINT()
+            if not a.user32.GetCursorPos(a.ctypes.byref(pt)):
+                return None
+            return int(pt.x), int(pt.y)
+        except Exception:
+            return None
     return None
 
 
@@ -257,7 +482,17 @@ def move_window(win_id: str, x: int, y: int) -> bool:
             return False
         return r.returncode == 0
 
-    # TODO(win): SetWindowPos(hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+    if IS_WINDOWS:
+        try:
+            hwnd = _win_hwnd(win_id)
+            if hwnd is None:
+                return False
+            return bool(_w().user32.SetWindowPos(
+                hwnd, None, int(x), int(y), 0, 0,
+                _SWP_NOSIZE | _SWP_NOZORDER | _SWP_NOACTIVATE,
+            ))
+        except Exception:
+            return False
     return False
 
 
@@ -283,7 +518,36 @@ def toggle_maximize(win_id: str) -> bool:
             print(f"[toggle_maximize] wmctrl: {e}", flush=True)
             return False
 
-    # TODO(win): IsZoomed(hwnd) を見て ShowWindow(SW_MAXIMIZE / SW_RESTORE)
+    if IS_WINDOWS:
+        try:
+            hwnd = _win_hwnd(win_id)
+            if hwnd is None:
+                return False
+            u = _w().user32
+            u.ShowWindow(hwnd, _SW_RESTORE if u.IsZoomed(hwnd) else _SW_MAXIMIZE)
+            return True
+        except Exception as e:
+            print(f"[toggle_maximize] win32: {e}", flush=True)
+            return False
+    return False
+
+
+def minimize_window(win_id: str) -> bool:
+    """最小化する。成功したら True（Falseなら呼び出し側がpywebviewのminimize()へ
+    フォールバックする）。Linuxは従来どおりpywebview任せ（常にFalse）。
+
+    Windowsでは toggle_maximize がネイティブ(ShowWindow)で最大化するため、
+    最小化だけQt(setWindowState)で行うとQtの内部状態とOSの状態が食い違い、
+    「最大化→最小化」の後に復帰できなくなる。両方ネイティブに揃える。"""
+    if IS_WINDOWS:
+        try:
+            hwnd = _win_hwnd(win_id)
+            if hwnd is None:
+                return False
+            _w().user32.ShowWindow(hwnd, _SW_MINIMIZE)
+            return True
+        except Exception:
+            return False
     return False
 
 
@@ -300,8 +564,34 @@ def activate_window(win_id: str) -> None:
             pass
         return
 
-    # TODO(win): SetForegroundWindow（フォーカス奪取制限があるため
-    #            AttachThreadInput等の迂回が要る可能性あり）
+    if IS_WINDOWS:
+        try:
+            hwnd = _win_hwnd(win_id)
+            if hwnd is None:
+                return
+            a = _w()
+            u = a.user32
+            if u.IsIconic(hwnd):
+                u.ShowWindow(hwnd, _SW_RESTORE)
+            if u.SetForegroundWindow(hwnd):
+                return
+            # フォーカス奪取制限で失敗した場合: 現在の前面窓のスレッドに
+            # 入力キューを一時的に接続して前面化する（標準的な迂回策）。
+            fg = u.GetForegroundWindow()
+            if not fg:
+                return
+            fg_tid = u.GetWindowThreadProcessId(fg, None)
+            my_tid = a.kernel32.GetCurrentThreadId()
+            if fg_tid and fg_tid != my_tid:
+                u.AttachThreadInput(my_tid, fg_tid, True)
+                try:
+                    u.BringWindowToTop(hwnd)
+                    u.SetForegroundWindow(hwnd)
+                finally:
+                    u.AttachThreadInput(my_tid, fg_tid, False)
+        except Exception:
+            pass
+        return
     return
 
 
@@ -338,6 +628,65 @@ def remove_decorations(win_id: str) -> None:
             pass
         return
 
-    # TODO(win): 基本は pywebview の frameless=True で足りる見込み。足りなければ
-    #            SetWindowLongPtr で WS_CAPTION / WS_THICKFRAME を調整。
+    if IS_WINDOWS:
+        # 枠(タイトルバー)自体は pywebview の frameless=True で既に消えている。
+        # ただしQtのframeless窓は WS_MINIMIZEBOX / WS_SYSMENU を持たない
+        # ポップアップ窓になり、最小化するとタスクバーのボタンを押しても
+        # 復帰できなくなる（実機で確認）。見た目は変えずにこれらの属性だけ足す
+        # （HWNDは変わらないのでウィンドウIDも維持される）。
+        try:
+            hwnd = _win_hwnd(win_id)
+            if hwnd is None:
+                return
+            u = _w().user32
+            before = int(u.GetWindowLongPtrW(hwnd, _GWL_STYLE))
+            want = before | _WS_MINIMIZEBOX | _WS_MAXIMIZEBOX | _WS_SYSMENU
+            if want != before:
+                u.SetWindowLongPtrW(hwnd, _GWL_STYLE, want)
+                u.SetWindowPos(
+                    hwnd, None, 0, 0, 0, 0,
+                    _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOZORDER
+                    | _SWP_NOACTIVATE | _SWP_FRAMECHANGED,
+                )
+            after = int(u.GetWindowLongPtrW(hwnd, _GWL_STYLE))
+            print(f"[winctl] style {before & 0xFFFFFFFF:#010x} -> {after & 0xFFFFFFFF:#010x}", flush=True)
+        except Exception as e:
+            print(f"[winctl] remove_decorations: {e}", flush=True)
+        return
     return
+
+
+def debug_window_state(win_id: str) -> str:
+    """【診断用】窓の状態を1行の文字列にして返す（Windowsのみ。環境変数
+    INK_BOSS_WINDEBUG=1 のときだけwindow.pyから定期的に呼ばれる）。
+    最小化から復帰できない等の不具合で「窓が本当に表示されているか」を調べる。"""
+    if not IS_WINDOWS:
+        return ""
+    try:
+        a = _w()
+        ct, wt = a.ctypes, a.wt
+        u = a.user32
+        hwnd = _win_hwnd(win_id)
+        if hwnd is None:
+            return f"hwnd={win_id} (存在しない)"
+        rect = wt.RECT()
+        u.GetWindowRect(hwnd, ct.byref(rect))
+        style = int(u.GetWindowLongPtrW(hwnd, _GWL_STYLE)) & 0xFFFFFFFF
+        ex = int(u.GetWindowLongPtrW(hwnd, -20)) & 0xFFFFFFFF
+        cloaked = wt.DWORD(0)
+        try:
+            dwm = ct.WinDLL("dwmapi")
+            dwm.DwmGetWindowAttribute(
+                wt.HWND(hwnd), wt.DWORD(14), ct.byref(cloaked), wt.DWORD(4))
+        except Exception:
+            pass
+        fg = u.GetForegroundWindow()
+        return (
+            f"hwnd={hwnd} rect=({rect.left},{rect.top},{rect.right},{rect.bottom}) "
+            f"size={rect.right - rect.left}x{rect.bottom - rect.top} "
+            f"visible={bool(u.IsWindowVisible(hwnd))} iconic={bool(u.IsIconic(hwnd))} "
+            f"zoomed={bool(u.IsZoomed(hwnd))} cloaked={cloaked.value} "
+            f"style={style:#010x} exstyle={ex:#010x} foreground={'self' if fg == hwnd else int(fg or 0)}"
+        )
+    except Exception as e:
+        return f"debug error: {e}"

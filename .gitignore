@@ -12,3 +12,7 @@ src-tauri/
 src-tauri/
 .env
 build/
+
+# Python仮想環境（Windows対応で追加）
+.venv/
+venv/

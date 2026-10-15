@@ -8,6 +8,7 @@ JS↔Pythonのシグナル橋渡しもここで行う。
 
 import json
 import re
+import sys
 import threading
 import time
 import traceback
@@ -87,8 +88,11 @@ def _build_spoofed_user_agent() -> str:
         return _spoofed_user_agent
 
     version = _detect_chrome_version()
+    # OS部分は実際のOSに合わせる（navigator.userAgentData.platform等の実値と
+    # 食い違うとボット検知シグナルになるため）
+    _ua_os = "Windows NT 10.0; Win64; x64" if sys.platform == "win32" else "X11; Linux x86_64"
     _spoofed_user_agent = (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        f"Mozilla/5.0 ({_ua_os}) AppleWebKit/537.36 "
         f"(KHTML, like Gecko) Chrome/{version} Safari/537.36"
     )
     print(f"[bridge] 設定するUA文字列: {_spoofed_user_agent}", flush=True)
@@ -112,7 +116,10 @@ class _StealthRequestInterceptor(QWebEngineUrlRequestInterceptor):
     def interceptRequest(self, info):
         info.setHttpHeader(b"Sec-CH-UA", self._sec_ch_ua)
         info.setHttpHeader(b"Sec-CH-UA-Mobile", b"?0")
-        info.setHttpHeader(b"Sec-CH-UA-Platform", b'"Linux"')
+        info.setHttpHeader(
+            b"Sec-CH-UA-Platform",
+            b'"Windows"' if sys.platform == "win32" else b'"Linux"',
+        )
 
 
 _stealth_interceptor: "_StealthRequestInterceptor | None" = None
@@ -388,6 +395,10 @@ class ViewBridge(QObject):
     # バックグラウンドスレッド（stdout読み取り）から呼ばれるため、
     # ダイアログ表示をQtメインスレッドへ安全に渡すのに使う。
     electron_add_service_signal = Signal(str)
+    # 任意の関数をQt GUIスレッドで実行する（pywebviewのワーカースレッド等から
+    # Qtウィジェットを触る必要があるときに使う。Windowsでは非GUIスレッドからの
+    # ウィジェット操作がデッドロックする）
+    run_on_gui_signal = Signal(object)
 
     def __init__(self, qt_app, config: dict):
         super().__init__()
@@ -425,6 +436,7 @@ class ViewBridge(QObject):
         self.add_group_signal.connect(self._add_group, Q)
         self.del_group_signal.connect(self._del_group, Q)
         self.init_views_signal.connect(self._init_views, Q)
+        self.run_on_gui_signal.connect(self._run_on_gui, Q)
         self.app_shutdown_signal.connect(self._on_app_shutdown, Q)
         self.electron_add_service_signal.connect(self.open_add_service_with_url, Q)
 
@@ -461,6 +473,13 @@ class ViewBridge(QObject):
                 continue
             print(f"[_init_views] emit create_view: {svc['id']}", flush=True)
             self.create_view_signal.emit(svc["id"], svc["url"])
+
+    @Slot(object)
+    def _run_on_gui(self, fn):
+        try:
+            fn()
+        except Exception as e:
+            print(f"[run_on_gui] {e}", flush=True)
 
     def set_container(self, widget):
         self.container = widget

@@ -9,6 +9,7 @@ B1: リサイズ時に Electron オーバーレイも追従。
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -80,42 +81,68 @@ def on_shown(window, bridge, icon_path: Path, aide_width_getter) -> None:
         # OSのタイトルバーを消す（frameless=True と二重でも害は少ない）
         winctl.remove_decorations(win_id)
         print(f"titlebar hidden: {win_id}", flush=True)
+        if os.environ.get("INK_BOSS_WINDEBUG") and not getattr(on_shown, "_debug_started", False):
+            on_shown._debug_started = True
+
+            def _debug_loop():
+                import time as _t
+                last = None
+                while True:
+                    cur = winctl.debug_window_state(win_id)
+                    if cur != last:
+                        print(f"[WINDEBUG] {cur}", flush=True)
+                        last = cur
+                    _t.sleep(0.25)
+
+            threading.Thread(target=_debug_loop, daemon=True).start()
 
     threading.Thread(target=hide_titlebar, daemon=True).start()
 
-    main_win = None
-    for w in QApplication.topLevelWidgets():
-        if w.isVisible() and w.windowTitle() == "Ink Boss":
-            main_win = w
-            break
-    if main_win is None:
+    def _setup_main_win():
+        # Qtウィジェット操作はGUIスレッドで行う（pywebviewのshownコールバックは
+        # ワーカースレッドで走るため、Windowsではここで直接触るとデッドロックする）
+        main_win = None
         for w in QApplication.topLevelWidgets():
-            if w.isVisible() and w.width() > 800:
+            if w.isVisible() and w.windowTitle() == "Ink Boss":
                 main_win = w
                 break
+        if main_win is None:
+            for w in QApplication.topLevelWidgets():
+                if w.isVisible() and w.width() > 800:
+                    main_win = w
+                    break
 
-    if main_win:
-        if icon_path.exists():
-            main_win.setWindowIcon(QIcon(str(icon_path)))
-        palette = main_win.palette()
-        palette.setColor(QPalette.ColorRole.Window, QColor("#080810"))
-        main_win.setPalette(palette)
-        main_win.setAutoFillBackground(True)
-        # A1 補強: Qt 側でも frameless（Linux のみ・既に frameless でも安全）
-        try:
-            flags = main_win.windowFlags()
-            if not (flags & Qt.WindowType.FramelessWindowHint):
-                main_win.setWindowFlags(flags | Qt.WindowType.FramelessWindowHint)
-                main_win.show()
-        except Exception as e:
-            print(f"[window] frameless flag: {e}", flush=True)
-        container = find_container(main_win)
-        print(f"[container] {type(container).__name__}", flush=True)
-        bridge.set_container(container)
+        if main_win:
+            if icon_path.exists():
+                main_win.setWindowIcon(QIcon(str(icon_path)))
+            palette = main_win.palette()
+            palette.setColor(QPalette.ColorRole.Window, QColor("#080810"))
+            main_win.setPalette(palette)
+            main_win.setAutoFillBackground(True)
+            # A1 補強: Qt 側でも frameless（Linuxのみ。Windowsはpywebviewの
+            # frameless指定に任せ、再showによる点滅・不具合を避ける）
+            if sys.platform.startswith("linux"):
+                try:
+                    flags = main_win.windowFlags()
+                    if not (flags & Qt.WindowType.FramelessWindowHint):
+                        main_win.setWindowFlags(flags | Qt.WindowType.FramelessWindowHint)
+                        main_win.show()
+                except Exception as e:
+                    print(f"[window] frameless flag: {e}", flush=True)
+            container = find_container(main_win)
+            print(f"[container] {type(container).__name__}", flush=True)
+            bridge.set_container(container)
+
+    # キュー順序: set_container → init_views の順でGUIスレッドに届く
+    bridge.run_on_gui_signal.emit(_setup_main_win)
 
     bridge.init_views_signal.emit()
 
     def on_resized(width, height):
+        # 最小化中はQtが極小サイズ(数px)を通知してくる。その値でビューを
+        # 1x1に縮めても意味がなく、復帰時のちらつき・不具合の元になるため無視。
+        if int(width) <= SIDEBAR_W or int(height) <= URLBAR_H:
+            return
         sid = bridge.active_id
         if not sid:
             return
