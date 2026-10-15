@@ -75,7 +75,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
         const hibernatedIds = await api().get_hibernated_ids();
         set({
           services: config.services ?? [],
-          groups: config.groups ?? [],
+          // 起動時は全グループを折りたたんだ状態で表示する。
+          // 開閉状態(collapsed)はconfig.jsonに保存していないため、
+          // 以前は作成時の初期値(false=開いた状態)で毎回全グループが
+          // 展開されて始まっていた。
+          groups: (config.groups ?? []).map((g) => ({ ...g, collapsed: true })),
           hibernatedIds: new Set(hibernatedIds),
           config: { ...defaultConfig, ...config },
           loaded: true,

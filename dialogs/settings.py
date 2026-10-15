@@ -835,7 +835,7 @@ def show_settings_dialog(config: dict, js_eval_fn):
     about_l.addSpacing(8)
     links_lbl = QLabel(
         '<a href="https://github.com/InkInc-official" style="color:rgba(255,255,255,0.5);">GitHub: InkInc-official</a><br>'
-        '<a href="https://inkinc-hp.vercel.app/" style="color:rgba(255,255,255,0.5);">Web: Ink Inc.</a><br>'
+        '<a href="https://inkinc-hp.pages.dev/" style="color:rgba(255,255,255,0.5);">Web: Ink Inc.</a><br>'
         '<a href="https://x.com/InkInc_Info" style="color:rgba(255,255,255,0.5);">X: @InkInc_Info</a>'
     )
     links_lbl.setOpenExternalLinks(True)

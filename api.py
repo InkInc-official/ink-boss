@@ -658,8 +658,93 @@ class InkBossAPI:
             webview.windows[0].minimize()
 
     def toggle_maximize(self):
+        # 以前は toggle_fullscreen() を使っていたため、画面全体を覆って
+        # 上部パネルや下部ドックまで隠れていた。
+        # ウィンドウマネージャの「最大化」(_NET_WM_STATE_MAXIMIZED) を
+        # 切り替えることで、パネル/ドックを避けた作業領域に収める。
+        import subprocess
+        from bridge import get_win_id
+
+        win_id = get_win_id()
+        if win_id:
+            try:
+                r = subprocess.run(
+                    ["wmctrl", "-ir", win_id, "-b",
+                     "toggle,maximized_vert,maximized_horz"],
+                    capture_output=True, timeout=2,
+                    env=get_clean_subprocess_env(),
+                )
+                if r.returncode == 0:
+                    return
+            except Exception as e:
+                print(f"[toggle_maximize] wmctrl: {e}", flush=True)
+        # wmctrl が使えない場合のみ従来動作にフォールバック
         if webview.windows:
             webview.windows[0].toggle_fullscreen()
+
+    def copy_to_clipboard(self, text):
+        # js_api は GUI スレッド以外から呼ばれるため、Qt のクリップボードは
+        # GUIスレッド側へ処理を渡して設定する（ブラウザの clipboard API は
+        # この環境では動かないことがある）。
+        import shutil
+        import subprocess
+
+        value = str(text or "")
+        print(f"[copy_to_clipboard] called len={len(value)}", flush=True)
+
+        # 1) 外部コマンド(xclip/xsel/wl-copy)があれば最優先。
+        #    スレッド事情に左右されず、アプリを閉じても中身が残る。
+        cmds = [
+            ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"],
+            ["wl-copy"],
+        ]
+        for cmd in cmds:
+            if not shutil.which(cmd[0]):
+                continue
+            try:
+                p = subprocess.Popen(
+                    cmd, stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    env=get_clean_subprocess_env(),
+                    start_new_session=True,
+                )
+                p.stdin.write(value.encode("utf-8"))
+                p.stdin.close()
+                print(f"[copy_to_clipboard] ok via {cmd[0]}", flush=True)
+                return True
+            except Exception as e:
+                print(f"[copy_to_clipboard] {cmd[0]} failed: {e}", flush=True)
+
+        # 2) Qt クリップボード（GUIスレッドへシグナルで渡す）
+        try:
+            from PySide6.QtCore import QObject, Signal, Qt
+            from PySide6.QtWidgets import QApplication
+
+            app = QApplication.instance()
+            if app is None:
+                return False
+            helper = getattr(self, "_clip_helper", None)
+            if helper is None:
+                class _ClipHelper(QObject):
+                    sig = Signal(str)
+
+                    def __init__(self):
+                        super().__init__()
+                        self.moveToThread(QApplication.instance().thread())
+                        self.sig.connect(self._on_sig, Qt.ConnectionType.QueuedConnection)
+
+                    def _on_sig(self, s):
+                        QApplication.clipboard().setText(s)
+
+                helper = _ClipHelper()
+                self._clip_helper = helper
+            helper.sig.emit(value)
+            print("[copy_to_clipboard] ok via Qt", flush=True)
+            return True
+        except Exception as e:
+            print(f"[copy_to_clipboard] Qt failed: {e}", flush=True)
+            return False
 
     def update_title(self, title):
         # frameless 時は OS タイトルは見えないが互換のため残す
