@@ -242,6 +242,48 @@ def _gather_process_diagnostics(root_pid: int) -> str:
 # （dbus-send・Electron・curlと3回同じ構造のバグを踏んだ末に共通化した）。
 
 
+def _cleanup_orphaned_electron_windows() -> None:
+    """Windows版の孤児Electron掃除。このアプリ同梱の electron.exe
+    （ENGINE_DIR\\node_modules\\electron\\dist 配下）だけを対象にする。
+    メインプロセス＝親が同じ electron.exe ではないもの。その親が既に
+    存在しなければ孤児として、配下ごと強制終了する。親が生きている
+    （＝別の現行Ink Bossが動作中）ものは触らない。"""
+    import time as _time
+    import winctl
+
+    try:
+        dist = os.path.normcase(os.path.normpath(
+            str(ENGINE_DIR / "node_modules" / "electron" / "dist")))
+        procs = winctl.list_processes()
+        if not procs:
+            return
+        alive = {pid for pid, _pp, _n in procs}
+        ours: set[int] = set()
+        for pid, _pp, name in procs:
+            if name.lower() != "electron.exe":
+                continue
+            img = winctl.process_image_path(pid)
+            if img and os.path.normcase(os.path.dirname(os.path.normpath(img))) == dist:
+                ours.add(pid)
+        orphan_roots = [
+            pid for pid, pp, _n in procs
+            if pid in ours and pp not in ours and pp not in alive
+        ]
+        if not orphan_roots:
+            return
+        targets: set[int] = set()
+        for root in orphan_roots:
+            targets |= winctl.descendant_pids(root)
+        targets &= ours | set(orphan_roots)
+        print(f"[ElectronEngine] cleanup: found orphaned electron-engine process tree {sorted(targets)}", flush=True)
+        for pid in targets:
+            ok = winctl.terminate_pid(pid)
+            print(f"[ElectronEngine] cleanup: terminate {pid} -> {'ok' if ok else 'failed'}", flush=True)
+        _time.sleep(0.5)  # userDataロックの解放待ち
+    except Exception as e:
+        print(f"[ElectronEngine] cleanup: Windows cleanup error: {e}", flush=True)
+
+
 def cleanup_orphaned_electron_processes() -> None:
     """前回の異常終了（Qt側クラッシュ・SIGKILL・ハードウォッチドッグの
     os._exit等）でElectronヘルパーの終了処理が走らなかった場合、
@@ -256,10 +298,10 @@ def cleanup_orphaned_electron_processes() -> None:
     ツリーごと終了させる。まだ生きている親を持つプロセス（＝今まさに
     動いている別のInk Bossインスタンス）は誤って巻き込まないよう、
     対象から除外する。"""
+    if sys.platform == "win32":
+        _cleanup_orphaned_electron_windows()
+        return
     if not sys.platform.startswith("linux"):
-        # TODO(win): /proc・SIGTERM/SIGKILL前提のため現状はLinux専用。Windowsでは
-        #            Toolhelpスナップショットでの列挙とTerminateProcessで同等の
-        #            孤児掃除を実装する（手順(4)）。それまでは何もしない。
         return
     marker = str(ENGINE_DIR / "main.js")
     try:

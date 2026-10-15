@@ -777,3 +777,83 @@ def debug_window_state(win_id: str) -> str:
         )
     except Exception as e:
         return f"debug error: {e}"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# プロセス列挙・終了（Windows専用。孤児Electronの掃除用）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def list_processes() -> list[tuple[int, int, str]]:
+    """全プロセスを (pid, 親pid, exe名) のリストで返す。Windows以外/失敗時は空。"""
+    if not IS_WINDOWS:
+        return []
+    try:
+        a = _w()
+        snap = a.kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        if not snap or int(snap) == -1:
+            return []
+        out: list[tuple[int, int, str]] = []
+        try:
+            entry = a.PROCESSENTRY32W()
+            entry.dwSize = a.ctypes.sizeof(a.PROCESSENTRY32W)
+            ok = a.kernel32.Process32FirstW(snap, a.ctypes.byref(entry))
+            while ok:
+                out.append((int(entry.th32ProcessID),
+                            int(entry.th32ParentProcessID),
+                            str(entry.szExeFile)))
+                ok = a.kernel32.Process32NextW(snap, a.ctypes.byref(entry))
+        finally:
+            a.kernel32.CloseHandle(snap)
+        return out
+    except Exception:
+        return []
+
+
+def process_image_path(pid: int) -> str | None:
+    """プロセスの実行ファイルのフルパス。取得不能なら None。"""
+    if not IS_WINDOWS:
+        return None
+    try:
+        a = _w()
+        ct, wt = a.ctypes, a.wt
+        k = a.kernel32
+        k.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+        k.OpenProcess.restype = wt.HANDLE
+        k.QueryFullProcessImageNameW.argtypes = [
+            wt.HANDLE, wt.DWORD, wt.LPWSTR, ct.POINTER(wt.DWORD)]
+        k.QueryFullProcessImageNameW.restype = wt.BOOL
+        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return None
+        try:
+            buf = ct.create_unicode_buffer(1024)
+            size = wt.DWORD(1024)
+            if k.QueryFullProcessImageNameW(h, 0, buf, ct.byref(size)):
+                return buf.value
+            return None
+        finally:
+            k.CloseHandle(h)
+    except Exception:
+        return None
+
+
+def terminate_pid(pid: int) -> bool:
+    """TerminateProcess で強制終了する。成功で True。"""
+    if not IS_WINDOWS:
+        return False
+    try:
+        a = _w()
+        wt = a.wt
+        k = a.kernel32
+        k.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+        k.OpenProcess.restype = wt.HANDLE
+        k.TerminateProcess.argtypes = [wt.HANDLE, wt.UINT]
+        k.TerminateProcess.restype = wt.BOOL
+        h = k.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
+        if not h:
+            return False
+        try:
+            return bool(k.TerminateProcess(h, 1))
+        finally:
+            k.CloseHandle(h)
+    except Exception:
+        return False
