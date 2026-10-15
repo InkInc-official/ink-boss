@@ -202,11 +202,36 @@ class InkBossAPI:
     def _overlay_follow_loop(self) -> None:
         import time as _t
         from bridge import get_win_id
+        from config import SIDEBAR_W, URLBAR_H
 
         last_rect = None
+        last_qt = None
         while True:
             _t.sleep(self.OVERLAY_FOLLOW_TICK_S)
             try:
+                # Qtエンジン: 表示中のビューを、OSが報告するウィンドウの実サイズに合わせる
+                # （Aideを開いたまま最大化・復帰すると、イベント通知の値が古く崩れるため）。
+                if self._active_engine == "qt" and self._bridge.active_id:
+                    qsid = self._bridge.active_id
+                    wid = get_win_id()
+                    qw = webview.windows[0] if webview.windows else None
+                    if wid and qw and not winctl.is_minimized(wid):
+                        native = winctl.get_window_rect(wid)
+                        if native is not None:
+                            _nx, _ny, nw, nh = native
+                            if nw > SIDEBAR_W and nh > URLBAR_H:
+                                q_rect = (
+                                    SIDEBAR_W,
+                                    URLBAR_H,
+                                    max(1, int(nw) - SIDEBAR_W - self._aide_width_val),
+                                    max(1, int(nh) - URLBAR_H),
+                                )
+                                key = (qsid,) + q_rect
+                                if key != last_qt:
+                                    last_qt = key
+                                    self._bridge.set_view_geometry_signal.emit(qsid, *q_rect)
+                    continue
+                last_qt = None
                 sid = self._active_sid
                 eng = self._electron
                 if (

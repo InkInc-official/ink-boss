@@ -375,6 +375,8 @@ class ViewBridge(QObject):
     # ─── シグナル定義 ───
     create_view_signal      = Signal(str, str)
     show_view_signal        = Signal(str, int, int, int, int)
+    # 表示済みビューの位置・大きさだけを更新する（フォーカス移動などはしない）
+    set_view_geometry_signal = Signal(str, int, int, int, int)
     hide_all_signal         = Signal()
     remove_view_signal      = Signal(str)
     reload_view_signal      = Signal(str)
@@ -422,6 +424,7 @@ class ViewBridge(QObject):
         # シグナル接続
         self.create_view_signal.connect(self._create_view, Q)
         self.show_view_signal.connect(self._show_view, Q)
+        self.set_view_geometry_signal.connect(self._set_view_geometry, Q)
         self.hide_all_signal.connect(self._hide_all, Q)
         self.remove_view_signal.connect(self._remove_view, Q)
         self.reload_view_signal.connect(self._reload_view, Q)
@@ -660,6 +663,13 @@ class ViewBridge(QObject):
             threading.Thread(target=_force_focus, args=(wid,), daemon=True).start()
         self.active_id = sid
         print(f"[TIMING2] {time.time():.3f} _show_view({sid}) SLOT EXIT, active_id={self.active_id}", flush=True)
+
+    @Slot(str, int, int, int, int)
+    def _set_view_geometry(self, sid: str, x: int, y: int, w: int, h: int):
+        view = self.views.get(sid)
+        if view is None or not view.isVisible():
+            return
+        view.setGeometry(QRect(x, y, w, h))
 
     @Slot()
     def _hide_all(self):
