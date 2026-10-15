@@ -242,7 +242,15 @@ def _check_and_show_update() -> None:
         import threading
         def _do():
             ok = download_and_install(dl_url, _progress)
-            if ok:
+            if ok and sys.platform == "win32":
+                # インストーラーが Ink Boss を入れ替えて自動で再起動する
+                status_label.setText("✅ 更新を開始します。自動で再起動します...")
+                progress.setValue(100)
+                qt_app.processEvents()
+                import time as _t
+                _t.sleep(2.0)
+                os._exit(0)
+            elif ok:
                 status_label.setText("✅ インストール完了。再起動してください。")
                 progress.setValue(100)
             else:

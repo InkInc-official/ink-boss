@@ -26,6 +26,17 @@ GITHUB_OWNER = "InkInc-official"
 GITHUB_REPO  = "ink-boss"
 GITHUB_PAT   = os.getenv("GITHUB_PAT", "")
 
+# テスト用: 更新確認の接続先を一時的に別リポジトリへ向ける（"owner/repo"形式）。
+# 通常運用では設定しない。非公開リポジトリを指す場合は GITHUB_PAT も必要。
+_override = os.getenv("INK_BOSS_UPDATE_REPO", "").strip()
+if "/" in _override:
+    GITHUB_OWNER, GITHUB_REPO = _override.split("/", 1)
+
+# PAT使用時（非公開リポジトリ）は browser_download_url が使えないため、
+# API用のアセットURLでダウンロードする。そのURLの末尾はIDなので、
+# 実際のファイル名をここに覚えておく。
+_ASSET_NAMES: dict[str, str] = {}
+
 def _read_version() -> str:
     """プロジェクトルートのVERSIONファイルを読む。build_deb.shのVERSION
     変数もこの同じファイルを読むようにしており、単一の情報源にしている
@@ -137,8 +148,19 @@ def check_update() -> dict:
     download_url = None
     for asset in release.get("assets", []):
         if asset.get("name", "").endswith(ASSET_EXT):
-            download_url = asset["browser_download_url"]
+            if GITHUB_PAT and asset.get("url"):
+                download_url = asset["url"]
+                _ASSET_NAMES[download_url] = asset["name"]
+            else:
+                download_url = asset["browser_download_url"]
             break
+
+    # Windows: 新タグのReleaseにまだ.exeが添付されていない（Linux版だけ先に公開した
+    # 等）場合は、更新ダイアログを出さない（押してもURLが無く失敗するだけのため）。
+    if download_url is None and platform.system() == "Windows":
+        print(f"[Updater] {latest_version} に Windows 用インストーラー(.exe)が未添付のためスキップ", flush=True)
+        return {"available": False, "latest_version": latest_version,
+                "download_url": None, "release_notes": ""}
 
     print(f"[Updater] 新バージョン検出: {CURRENT_VERSION} → {latest_version}", flush=True)
     return {
@@ -163,19 +185,35 @@ def download_and_install(download_url: str, progress_callback=None) -> bool:
         成功したかどうか
     """
     # ファイル名はダウンロードURLの末尾から取る（バージョンごとに変わるため）
-    filename = download_url.rstrip("/").rsplit("/", 1)[-1] or f"ink-boss{ASSET_EXT}"
-    save_path = Path.home() / "Downloads" / filename
+    filename = _ASSET_NAMES.get(download_url) or \
+        download_url.rstrip("/").rsplit("/", 1)[-1] or f"ink-boss{ASSET_EXT}"
+    save_dir = Path.home() / "Downloads"
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / filename
+    part_path = save_dir / (filename + ".part")  # 途中で切れた不完全ファイルを実行しないため
     headers = {}
     if GITHUB_PAT:
         headers["Authorization"] = f"Bearer {GITHUB_PAT}"
+        headers["Accept"] = "application/octet-stream"
+
+    class _NoAuthOnRedirect(urllib.request.HTTPRedirectHandler):
+        # GitHubは署名付きURL（別ホスト）へリダイレクトする。そこへ
+        # Authorizationヘッダーを持ち越すと拒否されるため外す。
+        def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+            nreq = super().redirect_request(req, fp, code, msg, hdrs, newurl)
+            if nreq is not None:
+                nreq.headers.pop("Authorization", None)
+                nreq.unredirected_hdrs.pop("Authorization", None)
+            return nreq
 
     try:
+        opener = urllib.request.build_opener(_NoAuthOnRedirect)
         req = urllib.request.Request(download_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=60) as res:
+        with opener.open(req, timeout=60) as res:
             total = int(res.headers.get("Content-Length", 0))
             downloaded = 0
             chunk = 8192
-            with open(save_path, "wb") as f:
+            with open(part_path, "wb") as f:
                 while True:
                     data = res.read(chunk)
                     if not data:
@@ -185,6 +223,9 @@ def download_and_install(download_url: str, progress_callback=None) -> bool:
                     if progress_callback:
                         progress_callback(downloaded, total)
 
+        if total and downloaded != total:
+            raise IOError(f"ダウンロードが途中で切れました ({downloaded}/{total})")
+        os.replace(part_path, save_path)
         print(f"[Updater] ダウンロード完了: {save_path}", flush=True)
 
         # インストール実行
@@ -199,9 +240,17 @@ def download_and_install(download_url: str, progress_callback=None) -> bool:
                 env=get_clean_subprocess_env(),
             )
         elif platform.system() == "Windows":
+            # Inno Setup のサイレント更新。自プロセスの子にしないため
+            # cmd /c start 経由で起動する（インストーラーが動作中の ink-boss.exe を
+            # taskkill /T で終了する際、子孫として巻き込まれないようにする）。
+            # 呼び出し側は True が返ったらアプリを終了すること。
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NO_WINDOW = 0x08000000
             subprocess.Popen(
-                [str(save_path), "/S"],  # サイレントインストール
-                start_new_session=True,
+                ["cmd.exe", "/c", "start", "", str(save_path),
+                 "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+                creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
+                close_fds=True,
             )
         return True
 
