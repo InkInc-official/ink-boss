@@ -119,10 +119,11 @@ python3 main.py
 ## ロードマップ
 
 - [ ] 1サービス内での複数タブ機能
-- [ ] サービスのフォルダ分け（ドラッグ&ドロップでの並べ替え）
+- [x] サービスのフォルダ分け（ドラッグ&ドロップでの並べ替え）
 - [ ] Windows / macOS対応
-- [ ] Aide（サイドパネルAIアシスタント）の正式統合
-- [ ] 配布パッケージ（.deb / AppImage）の自動ビルド
+- [x] Aide（サイドパネルAIアシスタント）の正式統合
+- [x] 配布パッケージ（.deb）のビルドスクリプト
+- [ ] AppImage対応（検討中）
 
 ---
 
@@ -148,7 +149,7 @@ MIT License — © 2026 黒井葉跡 / Ink Inc.
 
 AIによる創造と人によるケアを両立するIRIAMライバー事務所です。「無料でもここまでできる」を体現するために、内製ツールを積極的にOSSとして公開しています。
 
-- Web: https://inkinc-hp.vercel.app/
+- Web: https://inkinc-hp.pages.dev/
 - X: https://x.com/InkInc_Info
 - GitHub: https://github.com/InkInc-official
 
@@ -267,10 +268,11 @@ Config and sessions are stored at:
 ### Roadmap
 
 - [ ] Multiple tabs within a single service
-- [ ] Folder grouping for services (drag & drop reordering)
+- [x] Folder grouping for services (drag & drop reordering)
 - [ ] Windows / macOS support
-- [ ] Official integration of Aide (the sidebar AI assistant)
-- [ ] Automated build of distribution packages (.deb / AppImage)
+- [x] Official integration of Aide (the sidebar AI assistant)
+- [x] Build script for the .deb distribution package
+- [ ] AppImage support (under consideration)
 
 ---
 
@@ -296,7 +298,7 @@ MIT License — © 2026 Kuroi Hatsuto / Ink Inc.
 
 An IRIAM talent agency that combines AI-driven creation with human care. We actively open-source our in-house tools to show what's possible even on a shoestring budget.
 
-- Web: https://inkinc-hp.vercel.app/
+- Web: https://inkinc-hp.pages.dev/
 - X: https://x.com/InkInc_Info
 - GitHub: https://github.com/InkInc-official
 
