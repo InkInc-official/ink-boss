@@ -388,3 +388,7 @@ An IRIAM talent agency that combines AI-driven creation with human care. We acti
 
 - [Ink Timodal](https://github.com/InkInc-official/ink-timodal) — a fully local self-observation tool for ADHD creators
 - [Ink Calendar Lite](https://github.com/BlackHeart0731/ink-calendar-lite) — a serverless event-schedule sharing tool
+
+---
+
+Created by **Ink Inc.** / 黒井葉跡 (Kuroi Haato) — https://inkinc-hp.pages.dev/
