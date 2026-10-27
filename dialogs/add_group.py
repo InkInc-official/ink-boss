@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from config import DIALOG_STYLE, save_config
+import workspaces as ws_mod
 
 
 def show_add_group_dialog(config: dict, js_eval_fn) -> None:
@@ -42,10 +43,18 @@ def show_add_group_dialog(config: dict, js_eval_fn) -> None:
         name = name_input.text().strip()
         if not name:
             return
-        g = {"id": f"group_{uuid.uuid4().hex[:8]}", "name": name, "collapsed": False}
-        config["groups"].append(g)
+        wid = config.get("active_workspace", ws_mod.ALL_ID)
+        if ws_mod.is_all(wid):
+            g = {"id": f"group_{uuid.uuid4().hex[:8]}", "name": name, "collapsed": False}
+            config["groups"].append(g)
+            wid = ws_mod.ALL_ID
+        else:
+            g = ws_mod.add_group(config, wid, name)
+            if g is None:
+                return
         save_config(config)
-        js_eval_fn(f"window.dispatchEvent(new CustomEvent('group-added',{{detail:{json.dumps(g)}}}));")
+        detail = dict(g, workspaceId=wid)
+        js_eval_fn(f"window.dispatchEvent(new CustomEvent('group-added',{{detail:{json.dumps(detail)}}}));")
         dialog.accept()
 
     add_btn.clicked.connect(on_accept)

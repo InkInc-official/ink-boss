@@ -25,6 +25,7 @@ from config import SESSIONS_DIR, save_config
 from dialogs.settings     import show_settings_dialog
 from dialogs.add_service  import show_add_service_dialog
 from dialogs.add_group    import show_add_group_dialog
+from dialogs.add_workspace import show_add_workspace_dialog
 from dialogs.context_menu import show_service_context_menu, show_group_context_menu
 
 Q = Qt.ConnectionType.QueuedConnection
@@ -430,6 +431,7 @@ class ViewBridge(QObject):
     add_dialog_signal       = Signal(str)
     settings_signal         = Signal()
     add_group_dialog_signal = Signal()
+    add_workspace_dialog_signal = Signal()
     group_menu_signal       = Signal(str, str, int, int)
     add_group_signal        = Signal(str)
     del_group_signal        = Signal(str)
@@ -478,6 +480,7 @@ class ViewBridge(QObject):
         self.add_dialog_signal.connect(self._show_add_dialog, Q)
         self.settings_signal.connect(self._show_settings, Q)
         self.add_group_dialog_signal.connect(self._show_add_group_dialog, Q)
+        self.add_workspace_dialog_signal.connect(self._show_add_workspace_dialog, Q)
         self.group_menu_signal.connect(self._show_group_menu, Q)
         self.add_group_signal.connect(self._add_group, Q)
         self.del_group_signal.connect(self._del_group, Q)
@@ -989,6 +992,11 @@ class ViewBridge(QObject):
     def _show_add_group_dialog(self):
         self._show_dialog_with_electron_hidden(
             lambda: show_add_group_dialog(config=self.config, js_eval_fn=js_eval))
+
+    @Slot()
+    def _show_add_workspace_dialog(self):
+        self._show_dialog_with_electron_hidden(
+            lambda: show_add_workspace_dialog(config=self.config, js_eval_fn=js_eval))
 
     @Slot(str, str, int, int)
     def _show_group_menu(self, gid, name, x, y):

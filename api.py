@@ -16,6 +16,7 @@ import uuid
 import webview
 
 import winctl
+import workspaces as ws_mod
 from config import save_config
 from bridge import js_eval
 from sysenv import get_clean_subprocess_env
@@ -342,10 +343,11 @@ class InkBossAPI:
         new = json.loads(json_str)
         self._config.clear()
         self._config.update(new)
+        ws_mod.normalize(self._config)
         save_config(self._config)
 
     # ── services ──────────────────────────────────────────
-    def add_service(self, name, url, group_id=None, engine="qt"):
+    def add_service(self, name, url, group_id=None, engine="qt", workspace_id=None):
         eng = (engine or "qt").lower()
         if eng not in ("qt", "electron"):
             eng = "qt"
@@ -354,10 +356,14 @@ class InkBossAPI:
             "name": name,
             "url": url,
             "muted": False,
-            "groupId": group_id,
+            # 「すべて」以外のワークスペースから追加した場合、group_id はそのワークスペースの
+            # グループなので、サービス本体（=「すべて」側）のgroupIdには入れない。
+            "groupId": group_id if ws_mod.is_all(workspace_id) else None,
             "engine": eng,
         }
         self._config.setdefault("services", []).append(svc)
+        if not ws_mod.is_all(workspace_id):
+            ws_mod.add_service(self._config, workspace_id, svc["id"], group_id)
         save_config(self._config)
         try:
             if eng == "electron":
@@ -397,13 +403,18 @@ class InkBossAPI:
     def remove_service(self, sid):
         eng = self._service_engine(sid)
         self._config["services"] = [s for s in self._config.get("services", []) if s["id"] != sid]
+        ws_mod.purge_service(self._config, sid)
         save_config(self._config)
         if self._bridge.active_id == sid:
             self._bridge.active_id = None
             self._active_engine = None
         self._destroy_engine_view(sid, eng)
 
-    def move_service(self, sid, gid):
+    def move_service(self, sid, gid, workspace_id=None):
+        if not ws_mod.is_all(workspace_id):
+            ws_mod.move_service(self._config, workspace_id, sid, gid)
+            save_config(self._config)
+            return
         for s in self._config.get("services", []):
             if s["id"] == sid:
                 s["groupId"] = gid or None
@@ -587,7 +598,11 @@ class InkBossAPI:
         x, y, ww, h = self._get_rect(w, self._aide_width_val)
         self._bridge.update_geometry(sid, x, y, ww, h)
 
-    def reorder_services(self, service_ids):
+    def reorder_services(self, service_ids, workspace_id=None):
+        if not ws_mod.is_all(workspace_id):
+            ws_mod.reorder_services(self._config, workspace_id, service_ids)
+            save_config(self._config)
+            return
         id_order = list(service_ids or [])
         self._config["services"].sort(
             key=lambda s: id_order.index(s["id"]) if s["id"] in id_order else 999
@@ -595,20 +610,34 @@ class InkBossAPI:
         save_config(self._config)
 
     # ── groups ────────────────────────────────────────────
-    def add_group(self, name):
+    def add_group(self, name, workspace_id=None):
+        if not ws_mod.is_all(workspace_id):
+            g = ws_mod.add_group(self._config, workspace_id, name)
+            save_config(self._config)
+            return g
         g = {"id": f"group_{uuid.uuid4().hex[:8]}", "name": name, "collapsed": False}
         self._config.setdefault("groups", []).append(g)
         save_config(self._config)
         return g
 
-    def update_group(self, gid, name):
+    def update_group(self, gid, name, workspace_id=None):
+        if not ws_mod.is_all(workspace_id):
+            ws_mod.update_group(self._config, workspace_id, gid, name)
+            save_config(self._config)
+            return
         for g in self._config.get("groups", []):
             if g["id"] == gid:
                 g["name"] = name
                 break
         save_config(self._config)
 
-    def remove_group(self, gid, delete_services):
+    def remove_group(self, gid, delete_services, workspace_id=None):
+        if not ws_mod.is_all(workspace_id):
+            # ワークスペース内では「サービスごと削除」は「このワークスペースから外す」の意味
+            # （サービス本体は消えない）。
+            ws_mod.remove_group(self._config, workspace_id, gid, bool(delete_services))
+            save_config(self._config)
+            return
         self._config["groups"] = [g for g in self._config.get("groups", []) if g["id"] != gid]
         if delete_services:
             to_rm = [s for s in self._config.get("services", []) if s.get("groupId") == gid]
@@ -623,12 +652,55 @@ class InkBossAPI:
                     s["groupId"] = None
         save_config(self._config)
 
-    def reorder_groups(self, group_ids):
+    def reorder_groups(self, group_ids, workspace_id=None):
+        if not ws_mod.is_all(workspace_id):
+            ws_mod.reorder_groups(self._config, workspace_id, group_ids)
+            save_config(self._config)
+            return
         id_order = list(group_ids or [])
         self._config["groups"].sort(
             key=lambda g: id_order.index(g["id"]) if g["id"] in id_order else 999
         )
         save_config(self._config)
+
+    # ── workspaces ────────────────────────────────────────
+    # 「すべて」は仮想のワークスペース（id="all"）。services/groups をそのまま使う。
+    def add_workspace(self, name):
+        ws = ws_mod.add_workspace(self._config, name)
+        save_config(self._config)
+        return ws
+
+    def rename_workspace(self, wid, name):
+        ok = ws_mod.rename_workspace(self._config, wid, name)
+        if ok:
+            save_config(self._config)
+        return ok
+
+    def remove_workspace(self, wid):
+        ok = ws_mod.remove_workspace(self._config, wid)
+        if ok:
+            save_config(self._config)
+        return ok
+
+    def set_active_workspace(self, wid):
+        ok = ws_mod.set_active(self._config, wid)
+        if ok:
+            save_config(self._config)
+        return ok
+
+    def workspace_add_service(self, wid, sid, group_id=None):
+        """ワークスペースへ「複製」。同じサービスを載せるだけ（新しいサービスは作らない）。"""
+        ok = ws_mod.add_service(self._config, wid, sid, group_id)
+        if ok:
+            save_config(self._config)
+        return ok
+
+    def workspace_remove_service(self, wid, sid):
+        """このワークスペースからだけ外す（サービス本体と他のワークスペースには影響しない）。"""
+        ok = ws_mod.remove_service(self._config, wid, sid)
+        if ok:
+            save_config(self._config)
+        return ok
 
     # ── dialogs ───────────────────────────────────────────
     def show_context_menu(self, sid, name, x, y, is_hib, groups_json):
@@ -640,6 +712,9 @@ class InkBossAPI:
 
     def show_add_group_dialog(self):
         self._bridge.add_group_dialog_signal.emit()
+
+    def show_add_workspace_dialog(self):
+        self._bridge.add_workspace_dialog_signal.emit()
 
     def show_group_context_menu(self, gid, name, x, y):
         self._bridge.group_menu_signal.emit(gid, name, int(x), int(y))

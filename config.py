@@ -10,9 +10,12 @@ Ink Boss / Ink Inc.
     )
 """
 
+import copy
 import json
+import shutil
 from pathlib import Path
 
+import workspaces as ws_mod
 from platform_paths import config_dir
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -47,6 +50,9 @@ DEFAULT_CONFIG: dict = {
     "hibernate_minutes": 10,
     "services": [],
     "groups": [],
+    # ワークスペース（「すべて」以外。「すべて」は services/groups をそのまま使う仮想の枠）
+    "workspaces": [],
+    "active_workspace": "all",
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -150,12 +156,29 @@ def _migrate_service_engines(config: dict) -> bool:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 設定 I/O
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _backup_before_workspaces() -> None:
+    """ワークスペース導入前の config.json を、1度だけ config.json.bak-pre-workspaces に退避する。
+    保存の直前に呼ぶ。ディスク上の config.json に "workspaces" がまだ無い（=旧版の設定）
+    場合だけ、バックアップが無ければ作る。"""
+    try:
+        bak = CONFIG_FILE.with_name(CONFIG_FILE.name + ".bak-pre-workspaces")
+        if (
+            CONFIG_FILE.exists()
+            and not bak.exists()
+            and '"workspaces"' not in CONFIG_FILE.read_text(encoding="utf-8")
+        ):
+            shutil.copy2(CONFIG_FILE, bak)
+            print(f"[config] Backup created: {bak}", flush=True)
+    except Exception as e:
+        print(f"[config] Backup failed (continuing): {e}", flush=True)
+
+
 def load_config() -> dict:
     """config.jsonを読み込む。存在しなければデフォルト値を返す。
     存在する場合は、デフォルト値とマージして、新しい設定項目も反映されるようにする。
     """
     print("[config] load_config started.", flush=True) # debug
-    loaded_config = DEFAULT_CONFIG.copy() # デフォルト設定で初期化
+    loaded_config = copy.deepcopy(DEFAULT_CONFIG) # デフォルト設定で初期化（list/dictを共有しない）
     print(f"[config] Initial loaded_config: {json.dumps(loaded_config, ensure_ascii=False)}", flush=True) # debug
 
     if CONFIG_FILE.exists():
@@ -189,23 +212,28 @@ def load_config() -> dict:
                             loaded_config[key] = user_config[key]
                             print(f"[config] Merging: Updated '{key}' from user_config", flush=True) # debug
                     else:
-                        loaded_config[key] = default_value
+                        loaded_config[key] = copy.deepcopy(default_value)
                         print(f"[config] Merging: Added default '{key}'", flush=True) # debug
 
         except json.JSONDecodeError:
             print(f"[config] config.json is corrupted, using default config. Path: {CONFIG_FILE}", flush=True)
             # 破損している場合はデフォルト設定をそのまま使用
-            return DEFAULT_CONFIG.copy()
+            return copy.deepcopy(DEFAULT_CONFIG)
     else:
         print(f"[config] {CONFIG_FILE} does not exist. Using default config.", flush=True) # debug
 
-    if _migrate_service_engines(loaded_config):
+    changed = _migrate_service_engines(loaded_config)
+    # ワークスペース: 存在しないサービス等への参照の除去と、欠けているキーの補完。
+    if ws_mod.normalize(loaded_config):
+        changed = True
+    if changed:
         save_config(loaded_config)
 
     print(f"[config] Final loaded_config before return: {json.dumps(loaded_config, ensure_ascii=False)}", flush=True) # debug
     return loaded_config
 def save_config(config: dict) -> None:
     """configをconfig.jsonに書き込む。"""
+    _backup_before_workspaces()
     print(f"[config] save_config called. Config to save: {json.dumps(config, ensure_ascii=False)}", flush=True) # debug
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)

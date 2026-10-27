@@ -1,15 +1,29 @@
-import { useState, useRef, useEffect, useCallback } from "react";
-import { useAppStore } from "../store";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { useAppStore, deriveView } from "../store";
 import type { Service } from "../types";
+import { ALL_WORKSPACE_ID } from "../types";
 import ConfirmDialog from "./ConfirmDialog";
 
 export default function Sidebar() {
   const {
-    services, groups, activeServiceId, hibernatedIds, wakingIds,
+    services: allServices, groups: allGroups, workspaces, activeWorkspaceId,
+    activeServiceId, hibernatedIds, wakingIds,
     setActiveService, toggleGroupCollapsed,
     moveService, dropServiceLocal, reorderServices,
     removeGroup, setHibernated, updateService,
+    setActiveWorkspace, renameWorkspace, removeWorkspace, reorderGroups,
   } = useAppStore();
+  // 開いているワークスペースから見たサービス/グループ（「すべて」は従来どおり）
+  const { services, groups } = useMemo(
+    () => deriveView(allServices, allGroups, workspaces, activeWorkspaceId),
+    [allServices, allGroups, workspaces, activeWorkspaceId],
+  );
+  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
+  const activeWorkspaceName = activeWorkspace ? activeWorkspace.name : "すべて";
+  const [wsMenuOpen, setWsMenuOpen] = useState(false);
+  const [editingWsId, setEditingWsId] = useState<string | null>(null);
+  const [editingWsName, setEditingWsName] = useState("");
+  const [confirmDeleteWsId, setConfirmDeleteWsId] = useState<string | null>(null);
 
   const [expanded, setExpanded] = useState(true);
   const [bottomExpanded, setBottomExpanded] = useState(true);
@@ -50,10 +64,8 @@ export default function Sidebar() {
       // 右クリックメニュー「グループに移動」用。config.json側は正しく
       // 更新されるが、この購読が無いとサイドバーが再描画されず、
       // 見た目上「移動できない」ように見えていた（実機で確認済み）。
-      const { id, groupId } = e.detail;
-      useAppStore.setState((s) => ({
-        services: s.services.map((sv) => (sv.id === id ? { ...sv, groupId: groupId || undefined } : sv)),
-      }));
+      const { id, groupId, workspaceId } = e.detail;
+      useAppStore.getState().serviceMovedLocal(id, groupId, workspaceId);
     };
     const onCopied = (e: CustomEvent) => {
       // 右クリックメニュー「グループにコピー」用。同様にconfig.json側は
@@ -69,25 +81,27 @@ export default function Sidebar() {
       });
     };
     const onAdded = (e: CustomEvent) => {
-      const svc = e.detail;
-      useAppStore.setState((s) => {
-        if (s.services.some((x) => x.id === svc.id)) return s;
-        return {
-          services: [...s.services, svc],
-          hibernatedIds: new Set([...s.hibernatedIds, svc.id]),
-        };
-      });
+      const { workspaceIds, wsGroupId, ...svc } = e.detail;
+      useAppStore.getState().serviceAddedLocal(svc, workspaceIds, wsGroupId);
     };
     const onGroupAdded = (e: CustomEvent) => {
-      useAppStore.setState((s) => ({ groups: [...s.groups, e.detail] }));
+      const { workspaceId, ...g } = e.detail;
+      useAppStore.getState().groupAddedLocal(g, workspaceId);
     };
     const onGroupRemoved = (e: CustomEvent) => {
-      useAppStore.setState((s) => ({
-        groups: s.groups.filter((g) => g.id !== e.detail),
-        services: s.services.map((sv) =>
-          sv.groupId === e.detail ? { ...sv, groupId: undefined } : sv,
-        ),
-      }));
+      useAppStore.getState().groupRemovedLocal(e.detail);
+    };
+    const onWsSvcAdded = (e: CustomEvent) => {
+      useAppStore.getState().serviceWsAddedLocal(e.detail.id, e.detail.workspaceId);
+    };
+    const onWsSvcRemoved = (e: CustomEvent) => {
+      useAppStore.getState().serviceWsRemovedLocal(e.detail.id, e.detail.workspaceId);
+    };
+    const onWorkspaceAdded = (e: CustomEvent) => {
+      useAppStore.getState().workspaceAddedLocal({
+        ...e.detail,
+        groups: (e.detail.groups ?? []).map((g: any) => ({ ...g, collapsed: true })),
+      });
     };
     const onHibChanged = (e: CustomEvent) => {
       useAppStore.setState((s) => ({
@@ -96,9 +110,7 @@ export default function Sidebar() {
     };
     const onGroupRenamed = (e: CustomEvent) => {
       const { id, name } = e.detail;
-      useAppStore.setState((s) => ({
-        groups: s.groups.map((g) => (g.id === id ? { ...g, name } : g)),
-      }));
+      useAppStore.getState().groupRenamedLocal(id, name);
     };
 
     const pairs: [string, EventListener][] = [
@@ -116,6 +128,9 @@ export default function Sidebar() {
       ["group-removed", onGroupRemoved as EventListener],
       ["hibernate-changed", onHibChanged as EventListener],
       ["group-renamed", onGroupRenamed as EventListener],
+      ["workspace-added", onWorkspaceAdded as EventListener],
+      ["service-ws-added", onWsSvcAdded as EventListener],
+      ["service-ws-removed", onWsSvcRemoved as EventListener],
     ];
     for (const [n, h] of pairs) window.addEventListener(n, h);
     return () => {
@@ -297,6 +312,59 @@ export default function Sidebar() {
           </div>
           {expanded && <span className="text-white font-display text-lg tracking-[0.2em] leading-none">INK BOSS</span>}
         </div>
+        {/* ワークスペース切替（上部プルダウン） */}
+        <div className="relative flex-shrink-0 px-1.5 py-1.5 border-b border-white/5">
+          <button
+            onClick={() => { if (!expanded) setExpanded(true); setWsMenuOpen(!wsMenuOpen); }}
+            className="flex items-center gap-2 w-full px-2.5 py-1.5 rounded-xl text-white/60 hover:text-white/90 hover:bg-white/5 transition-all"
+            title={!expanded ? `ワークスペース: ${activeWorkspaceName}` : undefined}
+          >
+            <span className="flex-shrink-0 w-7 h-5 flex items-center justify-center text-[10px] font-mono text-white/40">
+              {expanded ? "WS" : activeWorkspaceName[0]}
+            </span>
+            {expanded && <span className="flex-1 text-sm truncate text-left">{activeWorkspaceName}</span>}
+            {expanded && <span className="text-[10px] text-white/30">{wsMenuOpen ? "▲" : "▼"}</span>}
+          </button>
+          {wsMenuOpen && expanded && (
+            <div className="absolute left-1.5 right-1.5 top-full mt-1 z-50 rounded-xl border border-white/10 bg-[#12121c] shadow-xl py-1 max-h-72 overflow-y-auto">
+              {[{ id: ALL_WORKSPACE_ID, name: "すべて" }, ...workspaces].map((w) => {
+                const isAll = w.id === ALL_WORKSPACE_ID;
+                const isCur = w.id === activeWorkspaceId;
+                if (editingWsId === w.id) {
+                  return (
+                    <div key={w.id} className="px-2 py-1">
+                      <input
+                        autoFocus
+                        value={editingWsName}
+                        onChange={(e) => setEditingWsName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") { void renameWorkspace(w.id, editingWsName); setEditingWsId(null); }
+                          if (e.key === "Escape") setEditingWsId(null);
+                        }}
+                        onBlur={() => setEditingWsId(null)}
+                        className="w-full bg-white/10 text-white text-sm rounded-lg px-2 py-1 outline-none"
+                      />
+                    </div>
+                  );
+                }
+                return (
+                  <div key={w.id} className={`group/ws flex items-center gap-1 px-2 py-1.5 mx-1 rounded-lg cursor-pointer ${isCur ? "bg-white/10 text-white" : "text-white/60 hover:bg-white/5 hover:text-white/90"}`}
+                    onClick={() => { void setActiveWorkspace(w.id); setWsMenuOpen(false); }}>
+                    <span className="flex-1 text-sm truncate">{w.name}</span>
+                    {!isAll && (
+                      <>
+                        <button title="名前を変更" className="text-[11px] text-white/30 hover:text-white/80 px-1"
+                          onClick={(e) => { e.stopPropagation(); setEditingWsId(w.id); setEditingWsName(w.name); }}>✎</button>
+                        <button title="ワークスペースを削除" className="text-[11px] text-white/30 hover:text-red-300 px-1"
+                          onClick={(e) => { e.stopPropagation(); setConfirmDeleteWsId(w.id); setWsMenuOpen(false); }}>×</button>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
         <nav className="flex-1 overflow-y-auto overflow-x-hidden px-1.5 py-3 space-y-0.5 scrollbar-thin">
           {groups.map((group) => {
             const groupServices = services.filter((s) => s.groupId === group.id);
@@ -308,14 +376,14 @@ export default function Sidebar() {
                 onDrop={(e) => {
                   const srcId = e.dataTransfer.getData("dragGroupId");
                   if (srcId && srcId !== group.id) {
-                    useAppStore.setState((s) => {
-                      const gs = [...s.groups];
-                      const from = gs.findIndex((g: any) => g.id === srcId);
-                      const to = gs.findIndex((g: any) => g.id === group.id);
-                      if (from !== -1 && to !== -1) { const [item] = gs.splice(from, 1); gs.splice(to, 0, item); }
-                      return { groups: gs };
-                    });
-                    window.pywebview?.api?.reorder_groups?.(useAppStore.getState().groups.map((g: any) => g.id));
+                    const ids = groups.map((g) => g.id);
+                    const from = ids.indexOf(srcId);
+                    const to = ids.indexOf(group.id);
+                    if (from !== -1 && to !== -1) {
+                      ids.splice(from, 1);
+                      ids.splice(to, 0, srcId);
+                      void reorderGroups(ids);
+                    }
                   } else if (dragService.current) {
                     moveService(dragService.current, group.id);
                     dragService.current = null;
@@ -387,6 +455,10 @@ export default function Sidebar() {
                 <span className="flex-shrink-0 w-7 h-7 flex items-center justify-center text-lg leading-none font-light">G</span>
                 {expanded && <span className="text-sm">グループ</span>}
               </button>
+              <button onClick={() => window.pywebview?.api?.show_add_workspace_dialog?.()} className="flex items-center gap-2.5 w-full px-2.5 py-2 rounded-xl text-white/40 hover:text-white/80 hover:bg-white/5 transition-all" title={!expanded ? "ワークスペースを作成" : undefined}>
+                <span className="flex-shrink-0 w-7 h-7 flex items-center justify-center text-sm leading-none font-mono">WS</span>
+                {expanded && <span className="text-sm">ワークスペース</span>}
+              </button>
               <button onClick={() => window.pywebview?.api?.show_settings_dialog()} className="flex items-center gap-2.5 w-full px-2.5 py-2 rounded-xl text-white/40 hover:text-white/80 hover:bg-white/5 transition-all" title={!expanded ? "設定" : undefined}>
                 <span className="flex-shrink-0 w-7 h-7 flex items-center justify-center">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -397,6 +469,12 @@ export default function Sidebar() {
           )}
         </div>
       </aside>
+      {confirmDeleteWsId && (
+        <ConfirmDialog title="ワークスペースを削除"
+          message={`「${workspaces.find((w) => w.id === confirmDeleteWsId)?.name ?? ""}」を削除しますか？\nサービス本体は「すべて」に残ります。`}
+          onConfirm={() => { void removeWorkspace(confirmDeleteWsId); setConfirmDeleteWsId(null); }}
+          onCancel={() => setConfirmDeleteWsId(null)} />
+      )}
       {confirmDeleteGroupId && confirmDeleteGroup && (
         <ConfirmDialog title="グループを削除" message={`「${confirmDeleteGroup.name}」を削除しますか？\nサービスはグループ解除されます。`}
           onConfirm={() => { removeGroup(confirmDeleteGroupId, false); setConfirmDeleteGroupId(null); }}

@@ -17,6 +17,19 @@ export interface Group {
   collapsed: boolean;
 }
 
+/** ワークスペース: サービス本体は共通で、並び順とグループだけを別に持つ「ページ」 */
+export interface Workspace {
+  id: string;
+  name: string;
+  serviceIds: string[];
+  groups: Group[];
+  /** サービスID → グループID */
+  groupOf: Record<string, string>;
+}
+
+/** 「すべて」（削除・改名できない常設ワークスペース。従来の並び/グループそのもの） */
+export const ALL_WORKSPACE_ID = "all";
+
 export type LLMBackend = "ollama" | "claude" | "gemini" | "deepseek";
 
 export interface LLMConfig {
@@ -35,6 +48,8 @@ export interface AppConfig {
   llm: LLMConfig;
   services: Service[];
   groups: Group[];
+  workspaces?: Workspace[];
+  active_workspace?: string;
 }
 
 declare global {
@@ -46,14 +61,19 @@ declare global {
           url: string,
           groupId?: string,
           engine?: ServiceEngine,
+          workspaceId?: string,
         ) => Promise<Service>;
         update_service: (id: string, updates: Partial<Service>) => Promise<void>;
         remove_service: (id: string) => Promise<void>;
-        move_service: (id: string, groupId: string) => Promise<void>;
+        move_service: (id: string, groupId: string, workspaceId?: string) => Promise<void>;
         copy_service: (id: string, groupId: string) => Promise<Service>;
-        add_group: (name: string) => Promise<Group>;
-        update_group: (id: string, name: string) => Promise<void>;
-        remove_group: (id: string, deleteServices: boolean) => Promise<void>;
+        add_group: (name: string, workspaceId?: string) => Promise<Group>;
+        update_group: (id: string, name: string, workspaceId?: string) => Promise<void>;
+        remove_group: (id: string, deleteServices: boolean, workspaceId?: string) => Promise<void>;
+        rename_workspace?: (id: string, name: string) => Promise<boolean>;
+        remove_workspace?: (id: string) => Promise<boolean>;
+        set_active_workspace?: (id: string) => Promise<boolean>;
+        show_add_workspace_dialog?: () => Promise<void>;
         get_config: () => Promise<AppConfig>;
         export_config: () => Promise<string>;
         import_config: (json: string) => Promise<void>;
@@ -65,8 +85,8 @@ declare global {
         hibernate_service: (id: string) => Promise<void>;
         wake_service: (id: string) => Promise<void>;
         get_hibernated_ids: () => Promise<string[]>;
-        reorder_groups?: (ids: string[]) => Promise<void>;
-        reorder_services?: (ids: string[]) => Promise<void>;
+        reorder_groups?: (ids: string[], workspaceId?: string) => Promise<void>;
+        reorder_services?: (ids: string[], workspaceId?: string) => Promise<void>;
         show_context_menu?: (
           id: string,
           name: string,

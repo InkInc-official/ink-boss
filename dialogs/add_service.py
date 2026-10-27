@@ -11,10 +11,14 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 from config import DIALOG_STYLE, save_config
+import workspaces as ws_mod
 
 
 def show_add_service_dialog(config: dict, js_eval_fn, create_view_fn, group_id: str = "", initial_url: str = "") -> None:
-    groups = config.get("groups", [])
+    wid_active = config.get("active_workspace", ws_mod.ALL_ID)
+    if ws_mod.find(config, wid_active) is None:
+        wid_active = ws_mod.ALL_ID
+    workspaces = config.get("workspaces", [])
     gid_init = group_id or None
 
     dialog = QDialog()
@@ -63,14 +67,50 @@ def show_add_service_dialog(config: dict, js_eval_fn, create_view_fn, group_id: 
     if initial_url:
         url_input.setText(initial_url)
 
-    group_combo = None
-    if groups:
-        layout.addWidget(QLabel("グループ（任意）"))
-        group_combo = QComboBox()
+    # 追加先のワークスペース（初期値は今開いているワークスペース）
+    ws_combo = None
+    if workspaces:
+        layout.addWidget(QLabel("ワークスペース"))
+        ws_combo = QComboBox()
+        ws_combo.addItem("すべて", ws_mod.ALL_ID)
+        for w in workspaces:
+            ws_combo.addItem(w["name"], w["id"])
+        idx = ws_combo.findData(wid_active)
+        ws_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        layout.addWidget(ws_combo)
+
+    def _chosen_ws() -> str:
+        return (ws_combo.currentData() if ws_combo else ws_mod.ALL_ID) or ws_mod.ALL_ID
+
+    def _groups_for(wid: str) -> list:
+        if ws_mod.is_all(wid):
+            return config.get("groups", [])
+        w = ws_mod.find(config, wid)
+        return w["groups"] if w else []
+
+    group_label = QLabel("グループ（任意）")
+    group_combo = QComboBox()
+    layout.addWidget(group_label)
+    layout.addWidget(group_combo)
+
+    def _fill_groups() -> None:
+        group_combo.clear()
+        gs = _groups_for(_chosen_ws())
         group_combo.addItem("グループなし", "")
-        for g in groups:
+        for g in gs:
             group_combo.addItem(g["name"], g["id"])
-        layout.addWidget(group_combo)
+        # 呼び出し元がグループを指定していて、候補にあれば選んでおく
+        if gid_init:
+            i = group_combo.findData(gid_init)
+            if i >= 0:
+                group_combo.setCurrentIndex(i)
+        visible = bool(gs)
+        group_label.setVisible(visible)
+        group_combo.setVisible(visible)
+
+    _fill_groups()
+    if ws_combo:
+        ws_combo.currentIndexChanged.connect(lambda _=None: _fill_groups())
 
     btn_layout = QHBoxLayout()
     cancel_btn = QPushButton("キャンセル")
@@ -90,18 +130,28 @@ def show_add_service_dialog(config: dict, js_eval_fn, create_view_fn, group_id: 
             return
         if not url.startswith("http"):
             url = f"https://{url}"
-        gid = (group_combo.currentData() or None) if group_combo else (gid_init or None)
+        gid = group_combo.currentData() or None
+        wid = _chosen_ws()
+        in_ws = not ws_mod.is_all(wid)
         eng = engine_combo.currentData() or "qt"
         svc = {
             "id": f"service_{uuid.uuid4().hex[:8]}",
             "name": name,
             "url": url,
             "muted": False,
-            "groupId": gid or None,
+            "groupId": None if in_ws else (gid or None),
             "engine": eng,
         }
         config["services"].append(svc)
+        ws_ids = []
+        if in_ws:
+            # 本体は1つだけ作り、選んだワークスペースに載せる
+            ws_mod.add_service(config, wid, svc["id"], gid)
+            ws_ids = [wid]
         save_config(config)
+        svc = dict(svc)
+        svc["workspaceIds"] = ws_ids
+        svc["wsGroupId"] = (gid or None) if in_ws else None
         accepted["svc"] = svc
         dialog.accept()
 

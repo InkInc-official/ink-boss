@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QPoint
 from config import DIALOG_STYLE, MENU_STYLE, save_config, CONFIG_DIR
+import workspaces as ws_mod
 
 
 def _clamp_menu_point(x: int, y: int, menu: QMenu) -> QPoint:
@@ -83,11 +84,14 @@ def show_service_context_menu(
         for g in groups:
             a = mm.addAction(g["name"])
             move_map[id(a)] = g["id"]
-        cm = menu.addMenu("グループにコピー")
-        cm.setStyleSheet(MENU_STYLE)
-        for g in groups:
-            a = cm.addAction(g["name"])
-            copy_map[id(a)] = g["id"]
+        # 「グループにコピー」は新しいサービスを作る従来機能なので「すべて」でのみ出す
+        # （ワークスペースでは後述の「ワークスペースへ複製」が同じサービスを載せる）
+        if ws_mod.is_all(config.get("active_workspace")):
+            cm = menu.addMenu("グループにコピー")
+            cm.setStyleSheet(MENU_STYLE)
+            for g in groups:
+                a = cm.addAction(g["name"])
+                copy_map[id(a)] = g["id"]
         menu.addSeparator()
 
     # エンジン表示（非活性・情報のみ）と切替（別項目・要確認）
@@ -98,6 +102,27 @@ def show_service_context_menu(
     status_a.setEnabled(False)
     switch_a = menu.addAction("エンジンを切り替える…")
     menu.addSeparator()
+
+    # ── ワークスペース ──
+    # 複製: 同じサービスを他のワークスペースにも載せる（新しいサービスは作らない）
+    # 外す: 今のワークスペースからだけ取り除く（本体・他のワークスペースは残る）
+    cur_wid = config.get("active_workspace", ws_mod.ALL_ID)
+    wsc_map = {}
+    unlink_a = None
+    all_ws = config.get("workspaces", [])
+    targets = [w for w in all_ws if w["id"] != cur_wid]
+    if targets:
+        wm = menu.addMenu("ワークスペースへ複製")
+        wm.setStyleSheet(MENU_STYLE)
+        for w in targets:
+            has = sid in w.get("serviceIds", [])
+            a = wm.addAction(w["name"] + ("（追加済み）" if has else ""))
+            a.setEnabled(not has)
+            wsc_map[id(a)] = w["id"]
+    if not ws_mod.is_all(cur_wid):
+        unlink_a = menu.addAction("このワークスペースから外す")
+    if targets or unlink_a:
+        menu.addSeparator()
 
     toggle_a = menu.addAction("復帰" if is_hib else "休止")
     # 「今のページを更新」= 表示中のページをそのまま更新（ブラウザのF5相当）。
@@ -110,7 +135,8 @@ def show_service_context_menu(
     # （navigate_view_fn自体が内部でwake相当の処理を行うため安全）。
     reset_a = menu.addAction("サービスを更新")
     menu.addSeparator()
-    delete_a = menu.addAction("削除")
+    # 本体の削除は「すべて」でだけ行う（ワークスペースでは「外す」を使う）
+    delete_a = menu.addAction("削除") if ws_mod.is_all(cur_wid) else None
 
     pt = _clamp_menu_point(x, y, menu)
     action = menu.exec(pt)
@@ -141,7 +167,14 @@ def show_service_context_menu(
         js_eval_fn(
             f"window.dispatchEvent(new CustomEvent('service-reset',{{detail:'{sid}'}}));"
         )
-    elif action == delete_a:
+    elif unlink_a is not None and action == unlink_a:
+        ws_mod.remove_service(config, cur_wid, sid)
+        save_config(config)
+        js_eval_fn(
+            f"window.dispatchEvent(new CustomEvent('service-ws-removed',"
+            f"{{detail:{{id:'{sid}',workspaceId:'{cur_wid}'}}}}));"
+        )
+    elif delete_a is not None and action == delete_a:
         # 重要: hibernate ではなく remove
         rm = remove_view_fn or hibernate_view_fn
         wrap(lambda: _do_delete(sid, name, config, js_eval_fn, rm))
@@ -158,16 +191,29 @@ def show_service_context_menu(
             )
     else:
         aid = id(action)
-        if aid in move_map:
+        if aid in wsc_map:
+            to_wid = wsc_map[aid]
+            if ws_mod.add_service(config, to_wid, sid):
+                save_config(config)
+                js_eval_fn(
+                    f"window.dispatchEvent(new CustomEvent('service-ws-added',"
+                    f"{{detail:{{id:'{sid}',workspaceId:'{to_wid}'}}}}));"
+                )
+        elif aid in move_map:
             gid = move_map[aid]
-            for s in config["services"]:
-                if s["id"] == sid:
-                    s["groupId"] = gid
-                    break
+            wid = config.get("active_workspace", ws_mod.ALL_ID)
+            if ws_mod.is_all(wid):
+                for s in config["services"]:
+                    if s["id"] == sid:
+                        s["groupId"] = gid
+                        break
+                wid = ws_mod.ALL_ID
+            else:
+                ws_mod.move_service(config, wid, sid, gid)
             save_config(config)
             js_eval_fn(
                 f"window.dispatchEvent(new CustomEvent('service-moved',"
-                f"{{detail:{{id:'{sid}',groupId:'{gid}'}}}}));"
+                f"{{detail:{{id:'{sid}',groupId:'{gid}',workspaceId:'{wid}'}}}}));"
             )
         elif aid in copy_map:
             gid = copy_map[aid]
@@ -505,10 +551,14 @@ def _rename_group(gid: str, current_name: str, config: dict, js_eval_fn) -> None
     def on_ok():
         new_name = name_input.text().strip()
         if new_name:
-            for g in config["groups"]:
-                if g["id"] == gid:
-                    g["name"] = new_name
-                    break
+            wid = config.get("active_workspace", ws_mod.ALL_ID)
+            if ws_mod.is_all(wid):
+                for g in config["groups"]:
+                    if g["id"] == gid:
+                        g["name"] = new_name
+                        break
+            else:
+                ws_mod.update_group(config, wid, gid, new_name)
             save_config(config)
             js_eval_fn(
                 f"window.dispatchEvent(new CustomEvent('group-renamed',"
@@ -542,10 +592,14 @@ def _delete_group(gid: str, name: str, config: dict, js_eval_fn) -> None:
     cancel_btn.clicked.connect(dialog.close)
 
     def on_delete():
-        config["groups"] = [g for g in config["groups"] if g["id"] != gid]
-        for s in config["services"]:
-            if s.get("groupId") == gid:
-                s["groupId"] = None
+        wid = config.get("active_workspace", ws_mod.ALL_ID)
+        if ws_mod.is_all(wid):
+            config["groups"] = [g for g in config["groups"] if g["id"] != gid]
+            for s in config["services"]:
+                if s.get("groupId") == gid:
+                    s["groupId"] = None
+        else:
+            ws_mod.remove_group(config, wid, gid, False)
         save_config(config)
         js_eval_fn(
             f"window.dispatchEvent(new CustomEvent('group-removed',{{detail:'{gid}'}}));"
