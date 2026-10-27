@@ -68,7 +68,7 @@ echo ""
 echo "▶ バイナリをビルド中（数分かかります）..."
 
 cd "$SRC_DIR"
-pyinstaller --noconfirm ink-boss.spec
+pyinstaller --noconfirm --clean ink-boss.spec
 
 if [ ! -d "dist/ink-boss" ]; then
     echo "  ⚠️ PyInstallerの出力（dist/ink-boss/）が見つかりません。ビルドに失敗した可能性があります"
