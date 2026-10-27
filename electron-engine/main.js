@@ -70,6 +70,34 @@ function spoofSession(ses) {
   return ua;
 }
 
+// ── キーボードショートカット（shortcuts.py と対応。割り当てを変えたら両方揃えること）──
+// Electron側のページにフォーカスがあるとQtはキーを受け取れないため、ここで検出して
+// stdout経由でPythonへ渡す。実際の機能実行はPython側（ShortcutEngine）。
+let chordActive = false; // Alt+N の番号入力中（Pythonから POST /chord で更新）
+function isShortcutCandidate(code, flags) {
+  const isDigit = /^(Digit|Numpad)[0-9]$/.test(code);
+  if (flags === "a" && (isDigit || code === "KeyN")) return true;
+  if (flags === "ca" && (code === "KeyB" || code === "Comma" || code === "KeyE" || code === "KeyZ" || code === "KeyH" || code === "KeyK")) return true;
+  if (chordActive && (flags === "" || flags === "a") &&
+      (isDigit || code === "Enter" || code === "NumpadEnter" || code === "Escape" || code === "Backspace")) return true;
+  return false;
+}
+function forwardShortcutKey(event, input) {
+  if (input.type !== "keyDown" || input.isAutoRepeat) return false;
+  if (["Control", "Alt", "Shift", "Meta"].includes(input.key)) return false;
+  const flags = (input.control ? "c" : "") + (input.alt ? "a" : "") + (input.shift ? "s" : "") + (input.meta ? "m" : "");
+  if (isShortcutCandidate(input.code, flags)) {
+    event.preventDefault();
+    process.stdout.write(`INK_ELECTRON_KEY ${input.code} ${flags || "-"}\n`);
+    return true;
+  }
+  if (chordActive) {
+    // 番号入力中に他のキーが押された → 入力を取り消す（キー自体はページへ通す）
+    process.stdout.write(`INK_ELECTRON_KEY Other -\n`);
+  }
+  return false;
+}
+
 function createServiceWindow(sid, url, opts = {}) {
   if (windows.has(sid) && !windows.get(sid).isDestroyed()) {
     return windows.get(sid);
@@ -148,6 +176,7 @@ function createServiceWindow(sid, url, opts = {}) {
   // F12を奪うと他アプリのDevTools等と衝突するため、「このElectronウィンドウが
   // 実際にフォーカスされている時だけ」に限定するため。
   win.webContents.on("before-input-event", (event, input) => {
+    if (forwardShortcutKey(event, input)) return;
     if (input.type === "keyDown" && input.key === "F12" && !input.control && !input.alt && !input.meta) {
       event.preventDefault();
       win.webContents
@@ -566,6 +595,10 @@ async function handleRequest(req, res) {
       } else {
         hideAllExcept(null);
       }
+      return sendJson(res, 200, { ok: true });
+    }
+    if (req.method === "POST" && route === "/chord") {
+      chordActive = !!body.active;
       return sendJson(res, 200, { ok: true });
     }
     if (req.method === "POST" && route === "/hide_all") {

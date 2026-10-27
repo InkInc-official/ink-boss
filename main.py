@@ -108,6 +108,19 @@ electron_engine.on_add_service_requested = lambda url: bridge.electron_add_servi
 # への切り替え（Signal経由）は不要で、stdout読み取りスレッドから直接呼ぶ。
 electron_engine.on_ime_debug_requested = dump_ime_debug_info
 
+# キーボードショートカット（Qtのキー入力 + Electronから転送されたキー入力）
+from shortcuts import ShortcutController
+from bridge import js_eval as _js_eval
+_shortcuts = ShortcutController(
+    qt_app,
+    js_eval_fn=_js_eval,
+    open_settings_fn=lambda: bridge.settings_signal.emit(),
+    on_chord_changed=electron_engine.set_chord,
+)
+_shortcuts.attach_when_ready(lambda: bridge.container)
+_shortcuts.extra_actions["quick-switch"] = lambda: bridge.quick_switch_signal.emit()
+electron_engine.on_key_requested = lambda code, flags: _shortcuts.electron_key_signal.emit(code, flags)
+
 # Aide幅（set_aide_widthで更新される）
 _aide_width = 0
 
@@ -284,6 +297,8 @@ def main():
         electron=electron_engine,
         get_screen_rect_fn=get_screen_rect,
     )
+    _shortcuts.extra_actions["stop-all"] = api.shortcut_hibernate_all
+    _shortcuts.extra_actions["hibernate-current"] = api.shortcut_hibernate_current
     api.start_auto_hibernate()
     api.start_overlay_follower()
     bridge.engine_getter = lambda: api._active_engine

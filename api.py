@@ -540,6 +540,45 @@ class InkBossAPI:
         else:
             self._bridge.hibernate_view_signal.emit(sid)
 
+    # ── ショートカット用の休止（Ctrl+Alt+Z / Ctrl+Alt+H）─────────────
+    def _open_service_id(self):
+        """いま画面に表示中のサービスID（何も表示していなければ None）。"""
+        if self._active_engine is None:
+            return None
+        return self._active_sid or self._bridge.active_id
+
+    def _hibernate_and_notify(self, sid) -> None:
+        try:
+            self.hibernate_service(sid)
+            js_eval(
+                f"window.dispatchEvent(new CustomEvent('service-hibernated',"
+                f"{{detail:{json.dumps(sid)}}}))"
+            )
+            self._last_active.pop(sid, None)
+        except Exception as e:
+            print(f"[shortcut] hibernate {sid} failed: {e}", flush=True)
+
+    def shortcut_hibernate_all(self) -> None:
+        """開いているサービス以外を全部休止（Ctrl+Alt+Z）。"""
+        def _run():
+            keep = self._open_service_id()
+            awake, _audible = self._awake_state()
+            targets = [sid for sid in awake if sid != keep]
+            for sid in targets:
+                self._hibernate_and_notify(sid)
+            print(f"[shortcut] hibernate all: {len(targets)} service(s), kept={keep}", flush=True)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def shortcut_hibernate_current(self) -> None:
+        """開いているサービスだけを休止（Ctrl+Alt+H）。"""
+        def _run():
+            sid = self._open_service_id()
+            if not sid:
+                return
+            self._hibernate_and_notify(sid)
+            print(f"[shortcut] hibernate current: {sid}", flush=True)
+        threading.Thread(target=_run, daemon=True).start()
+
     def wake_service(self, sid):
         svc = self._find_service(sid)
         url = (svc or {}).get("url") or self._bridge.urls.get(sid, "about:blank")

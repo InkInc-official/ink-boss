@@ -26,6 +26,8 @@ export default function Sidebar() {
   const [confirmDeleteWsId, setConfirmDeleteWsId] = useState<string | null>(null);
 
   const [expanded, setExpanded] = useState(true);
+  // Alt+N → 番号入力中の表示（null = 入力中ではない）
+  const [chordText, setChordText] = useState<string | null>(null);
   const [bottomExpanded, setBottomExpanded] = useState(true);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editingGroupName, setEditingGroupName] = useState("");
@@ -137,6 +139,52 @@ export default function Sidebar() {
       for (const [n, h] of pairs) window.removeEventListener(n, h);
     };
   }, [setHibernated, dropServiceLocal, updateService]);
+
+  // ── キーボードショートカット（Python側 shortcuts.py から届く） ──
+  useEffect(() => {
+    const onShortcut = (e: CustomEvent) => {
+      const { action, arg } = e.detail ?? {};
+      if (action === "workspace-goto") {
+        const list = [{ id: ALL_WORKSPACE_ID }, ...useAppStore.getState().workspaces];
+        const target = typeof arg === "number" ? list[arg] : undefined;
+        if (target) { void useAppStore.getState().setActiveWorkspace(target.id); setWsMenuOpen(false); }
+      } else if (action === "sidebar-toggle") {
+        setExpanded((v) => !v);
+      } else if (action === "goto-workspace") {
+        void useAppStore.getState().setActiveWorkspace(String(arg));
+        setWsMenuOpen(false);
+      } else if (action === "goto-service") {
+        // クイック切替で選んだサービスへ。いまのワークスペースに無ければ「すべて」へ移る
+        const st = useAppStore.getState();
+        const sid = String(arg);
+        const ws = st.workspaces.find((w) => w.id === st.activeWorkspaceId);
+        if (ws && !ws.serviceIds.includes(sid)) void st.setActiveWorkspace(ALL_WORKSPACE_ID);
+        st.setActiveService(sid);
+        void window.pywebview?.api?.show_service(sid);
+      } else if (action === "groups-toggle") {
+        // 開いているワークスペースのグループだけを全部開く／全部たたむ（1つでも開いていれば全部たたむ）
+        useAppStore.setState((st) => {
+          const cur = st.activeWorkspaceId === ALL_WORKSPACE_ID
+            ? st.groups : (st.workspaces.find((w) => w.id === st.activeWorkspaceId)?.groups ?? []);
+          const collapsed = cur.some((g) => !g.collapsed);
+          const set = (gs: any[]) => gs.map((g) => ({ ...g, collapsed }));
+          return st.activeWorkspaceId === ALL_WORKSPACE_ID
+            ? { groups: set(st.groups) }
+            : { workspaces: st.workspaces.map((w) => (w.id === st.activeWorkspaceId ? { ...w, groups: set(w.groups) } : w)) };
+        });
+      }
+    };
+    const onChord = (e: CustomEvent) => {
+      const { active, text } = e.detail ?? {};
+      setChordText(active ? String(text ?? "") : null);
+    };
+    window.addEventListener("ink-shortcut", onShortcut as EventListener);
+    window.addEventListener("ink-chord", onChord as EventListener);
+    return () => {
+      window.removeEventListener("ink-shortcut", onShortcut as EventListener);
+      window.removeEventListener("ink-chord", onChord as EventListener);
+    };
+  }, []);
 
   const ungrouped = services.filter((s) => !s.groupId);
   const getFavicon = (url: string) => {
@@ -312,6 +360,12 @@ export default function Sidebar() {
           </div>
           {expanded && <span className="text-white font-display text-lg tracking-[0.2em] leading-none">INK BOSS</span>}
         </div>
+        {chordText !== null && (
+          <div className="flex-shrink-0 px-2.5 py-1.5 border-b border-white/5 bg-white/10 text-white text-xs font-mono truncate"
+            title="数字を入力して Enter（Esc で取消）">
+            {expanded ? "ワークスペース番号: " : "N "}{chordText}<span className="animate-pulse">_</span>
+          </div>
+        )}
         {/* ワークスペース切替（上部プルダウン） */}
         <div className="relative flex-shrink-0 px-1.5 py-1.5 border-b border-white/5">
           <button
@@ -327,7 +381,7 @@ export default function Sidebar() {
           </button>
           {wsMenuOpen && expanded && (
             <div className="absolute left-1.5 right-1.5 top-full mt-1 z-50 rounded-xl border border-white/10 bg-[#12121c] shadow-xl py-1 max-h-72 overflow-y-auto">
-              {[{ id: ALL_WORKSPACE_ID, name: "すべて" }, ...workspaces].map((w) => {
+              {[{ id: ALL_WORKSPACE_ID, name: "すべて" }, ...workspaces].map((w, wsIdx) => {
                 const isAll = w.id === ALL_WORKSPACE_ID;
                 const isCur = w.id === activeWorkspaceId;
                 if (editingWsId === w.id) {
@@ -350,6 +404,7 @@ export default function Sidebar() {
                 return (
                   <div key={w.id} className={`group/ws flex items-center gap-1 px-2 py-1.5 mx-1 rounded-lg cursor-pointer ${isCur ? "bg-white/10 text-white" : "text-white/60 hover:bg-white/5 hover:text-white/90"}`}
                     onClick={() => { void setActiveWorkspace(w.id); setWsMenuOpen(false); }}>
+                    <span className="w-4 text-right text-[10px] font-mono text-white/30 flex-shrink-0">{wsIdx}</span>
                     <span className="flex-1 text-sm truncate">{w.name}</span>
                     {!isAll && (
                       <>

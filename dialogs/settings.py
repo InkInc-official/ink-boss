@@ -806,6 +806,42 @@ def show_settings_dialog(config: dict, js_eval_fn):
     tabs.addTab(data_w, "データ")
 
     # ────────────────────────────────────
+    # タブ: ショートカット一覧（shortcuts.py の SHORTCUT_LIST を表示）
+    # ────────────────────────────────────
+    from shortcuts import SHORTCUT_LIST
+    from html import escape as _esc
+    sc_scroll = QScrollArea()
+    sc_scroll.setWidgetResizable(True)
+    sc_scroll.setFrameShape(QFrame.Shape.NoFrame)
+    sc_w = QWidget()
+    sc_l = QVBoxLayout(sc_w)
+    sc_l.setContentsMargins(20, 16, 20, 16)
+    sc_l.setSpacing(10)
+    rows = "".join(
+        "<tr>"
+        f"<td style='padding:7px 14px 7px 0; white-space:nowrap; color:white; font-family:monospace;'>{_esc(k)}</td>"
+        f"<td style='padding:7px 14px 7px 0; white-space:nowrap; color:rgba(255,255,255,0.85);'>{_esc(a)}</td>"
+        f"<td style='padding:7px 0; color:rgba(255,255,255,0.4);'>{_esc(d)}</td>"
+        "</tr>"
+        for k, a, d in SHORTCUT_LIST
+    )
+    sc_lbl = QLabel(
+        "<table cellspacing='0'>"
+        "<tr><th align='left' style='color:rgba(255,255,255,0.3); font-size:10px; padding-bottom:6px;'>キー</th>"
+        "<th align='left' style='color:rgba(255,255,255,0.3); font-size:10px;'>動作</th>"
+        "<th align='left' style='color:rgba(255,255,255,0.3); font-size:10px;'>説明</th></tr>"
+        f"{rows}</table>"
+    )
+    sc_lbl.setTextFormat(Qt.TextFormat.RichText)
+    sc_lbl.setWordWrap(True)
+    sc_lbl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+    sc_lbl.setStyleSheet("font-size: 12px; border: none;")
+    sc_l.addWidget(sc_lbl)
+    sc_l.addStretch()
+    sc_scroll.setWidget(sc_w)
+    tabs.addTab(sc_scroll, "ショートカット")
+
+    # ────────────────────────────────────
     # タブ④: About
     # ────────────────────────────────────
     about_w = QWidget()

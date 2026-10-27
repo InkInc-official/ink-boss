@@ -43,6 +43,7 @@ def _resolve_base_dir() -> Path:
 ENGINE_DIR = _resolve_base_dir() / "electron-engine"
 READY_PREFIX = "INK_ELECTRON_READY port="
 ADD_SERVICE_PREFIX = "INK_ELECTRON_ADD_SERVICE "
+KEY_PREFIX = "INK_ELECTRON_KEY "  # ショートカット用: "<code> <flags|->"
 IME_DEBUG_PREFIX = "INK_ELECTRON_IME_DEBUG "  # 【デバッグ専用・調査完了後に削除】
 START_TIMEOUT_S = 25.0
 
@@ -377,6 +378,9 @@ class ElectronEngine:
         # （バックグラウンドスレッドから呼ばれるため、呼び出し側で
         # Qtメインスレッドへの受け渡しを行うこと）。
         self.on_add_service_requested: Callable[[str], None] | None = None
+        # ショートカット: main.js が INK_ELECTRON_KEY <code> <flags> を出力したときに呼ばれる
+        # （バックグラウンドスレッドから。Signal経由でQtメインスレッドへ渡すこと）
+        self.on_key_requested: Callable[[str, str], None] | None = None
         # 【デバッグ専用・調査完了後に削除】IME(fcitx5)不具合の切り分け用。
         # Electron側でF12が押されたとき(そのウィンドウが実際にフォーカスされて
         # いる時のみ発火)に呼ばれる。main.jsからのstdoutマーカー行経由。
@@ -485,6 +489,13 @@ class ElectronEngine:
                         self._ready.set()
                     except ValueError:
                         pass
+                elif line.startswith(KEY_PREFIX):
+                    parts = line[len(KEY_PREFIX) :].split()
+                    if len(parts) >= 2 and self.on_key_requested:
+                        try:
+                            self.on_key_requested(parts[0], parts[1])
+                        except Exception:
+                            pass
                 elif line.startswith(ADD_SERVICE_PREFIX):
                     url = line[len(ADD_SERVICE_PREFIX) :].strip()
                     if url and self.on_add_service_requested:
@@ -648,6 +659,16 @@ class ElectronEngine:
             {"sid": sid, "x": int(x), "y": int(y), "w": int(w), "h": int(h)},
             timeout=2.0,
         )
+
+    def set_chord(self, active: bool) -> None:
+        """Alt+N の番号入力中かどうかを main.js に伝える（入力中は数字/Enter/Esc/BSを横取りする）。"""
+        import threading
+        def _run():
+            try:
+                self._post("/chord", {"active": bool(active)}, timeout=2.0)
+            except Exception:
+                pass
+        threading.Thread(target=_run, daemon=True).start()
 
     def hibernate(self, sid: str) -> dict:
         if self.active_sid == sid:
