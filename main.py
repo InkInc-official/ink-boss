@@ -264,10 +264,29 @@ def _check_and_show_update() -> None:
                 _t.sleep(2.0)
                 os._exit(0)
             elif ok:
-                status_label.setText("✅ インストール完了。再起動してください。")
                 progress.setValue(100)
+                if getattr(sys, "frozen", False):
+                    # インストール済みの本体を、更新後のファイルで起動し直す
+                    status_label.setText("✅ インストール完了。自動で再起動します...")
+                    qt_app.processEvents()
+                    import time as _t, subprocess as _sp
+                    from sysenv import get_clean_subprocess_env
+                    _t.sleep(1.5)
+                    try:
+                        _sp.Popen([sys.executable], start_new_session=True,
+                                  env=get_clean_subprocess_env())
+                        os._exit(0)
+                    except Exception as _e:
+                        print(f"[Updater] 自動再起動に失敗: {_e}", flush=True)
+                status_label.setText("✅ インストール完了。「閉じる」を押してから、起動し直してください。")
+                skip_btn.setText("閉じる")
+                skip_btn.setEnabled(True)
             else:
-                status_label.setText("❌ ダウンロードに失敗しました。")
+                import updater as _upd
+                if getattr(_upd, "last_error", "") == "install":
+                    status_label.setText("❌ インストールが完了しませんでした（認証のキャンセルなど）。もう一度お試しください。")
+                else:
+                    status_label.setText("❌ ダウンロードに失敗しました。")
                 update_btn.setEnabled(True)
                 skip_btn.setEnabled(True)
             qt_app.processEvents()

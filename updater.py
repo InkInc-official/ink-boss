@@ -174,6 +174,10 @@ def check_update() -> dict:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ダウンロード＆インストール
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 直近の失敗の種類（""=なし / "install"=インストール段階での失敗・キャンセル）
+last_error = ""
+
+
 def download_and_install(download_url: str, progress_callback=None) -> bool:
     """
     アップデートをダウンロードしてインストールする。
@@ -240,11 +244,21 @@ def download_and_install(download_url: str, progress_callback=None) -> bool:
         # （sysenv.py参照。pkexecはroot権限で別途起動されるが、環境の
         # 継承経路を信用せず明示的にサニタイズしておく）。
         if platform.system() == "Linux":
-            subprocess.Popen(
+            # 以前は Popen して即 True を返していたため、パスワード入力（pkexec）や
+            # dpkg の完了を待たずに「インストール完了」と表示され、閉じて起動し直しても
+            # まだ旧版のまま→またアップデート通知、を繰り返す不具合があった。
+            # 完了まで待ち、終了コードで成否を判定する。
+            global last_error
+            last_error = ""
+            rc = subprocess.run(
                 ["pkexec", "dpkg", "-i", str(save_path)],
-                start_new_session=True,
                 env=get_clean_subprocess_env(),
-            )
+            ).returncode
+            if rc != 0:
+                # 126=認証ダイアログをキャンセル / 127=認証失敗 / その他=dpkgの失敗
+                print(f"[Updater] インストール失敗 (pkexec dpkg rc={rc})", flush=True)
+                last_error = "install"
+                return False
         elif platform.system() == "Windows":
             # Inno Setup のサイレント更新。自プロセスの子にしないため
             # cmd /c start 経由で起動する（インストーラーが動作中の ink-boss.exe を
