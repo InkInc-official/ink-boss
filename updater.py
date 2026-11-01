@@ -176,15 +176,18 @@ def check_update() -> dict:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 直近の失敗の種類（""=なし / "install"=インストール段階での失敗・キャンセル）
 last_error = ""
+# 直近にダウンロードしたパッケージのパス（失敗時に手動手順を案内するため）
+last_package_path = ""
 
 
-def download_and_install(download_url: str, progress_callback=None) -> bool:
+def download_and_install(download_url: str, progress_callback=None, status_callback=None) -> bool:
     """
     アップデートをダウンロードしてインストールする。
 
     Args:
         download_url:      ダウンロードURL
         progress_callback: (downloaded_bytes, total_bytes) → None
+        status_callback:   (phase) → None。phase は "installing"（インストール開始）
     Returns:
         成功したかどうか
     """
@@ -236,6 +239,8 @@ def download_and_install(download_url: str, progress_callback=None) -> bool:
         if total and downloaded != total:
             raise IOError(f"ダウンロードが途中で切れました ({downloaded}/{total})")
         os.replace(part_path, save_path)
+        global last_package_path
+        last_package_path = str(save_path)
         print(f"[Updater] ダウンロード完了: {save_path}", flush=True)
 
         # インストール実行
@@ -250,6 +255,8 @@ def download_and_install(download_url: str, progress_callback=None) -> bool:
             # 完了まで待ち、終了コードで成否を判定する。
             global last_error
             last_error = ""
+            if status_callback:
+                status_callback("installing")
             rc = subprocess.run(
                 ["pkexec", "dpkg", "-i", str(save_path)],
                 env=get_clean_subprocess_env(),

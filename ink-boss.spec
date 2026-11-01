@@ -17,11 +17,26 @@
 # 解決するため、electron-engine/ を実行ファイルと同じ階層に
 # 置きさえすれば dev/frozen どちらでも同じ相対構造で見つかる。
 
+import os
 import sys
 
 # Windowsでは UPX 圧縮を使わない（QtのDLLを壊す／ウイルス対策ソフトに
 # 誤検知されやすくなるため）。Linuxは従来どおり。
 _IS_WIN = sys.platform == "win32"
+
+def _collect(src, dst):
+    """src以下のファイルをdatas形式で集める。node_modulesは同梱しない
+    （frontend/publicに開発用のnode_modules(約170MB)が紛れ込むと、dist側にも
+    コピーされてパッケージが数百MB膨らみ、インストールが非常に遅くなるため）。"""
+    out = []
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if d != 'node_modules']
+        rel = os.path.relpath(root, src)
+        target = dst if rel == '.' else os.path.join(dst, rel)
+        for f in files:
+            out.append((os.path.join(root, f), target))
+    return out
+
 
 a = Analysis(
     ['main.py'],
@@ -29,7 +44,7 @@ a = Analysis(
     binaries=[],
     # VERSION: updater.pyのCURRENT_VERSIONがbuild_deb.shのVERSIONと
     # 単一の情報源を共有するために同梱する（updater.pyのdocstring参照）。
-    datas=[('frontend/dist', 'frontend/dist'), ('frontend/public', 'frontend/public'), ('VERSION', '.')],
+    datas=_collect('frontend/dist', 'frontend/dist') + _collect('frontend/public', 'frontend/public') + [('VERSION', '.')],
     # platformdirs: 直接は使っていないが、PyInstallerのpkg_resources
     # 用ランタイムフック(pyi_rth_pkgres)がsetuptools同梱のpkg_resources
     # を初期化する際に必要とする。hiddenimportsに無いとバンドルされず、

@@ -140,10 +140,13 @@ def _set_aide_width(val: int) -> None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ロック画面（ライセンス未認証時）
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_upd_refs: list = []  # 更新ダイアログの信号オブジェクトをGCされないよう保持
+
+
 def _check_and_show_update() -> None:
     """アップデートがあればダイアログを表示する"""
     from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar
-    from PySide6.QtCore import Qt, QThread, Signal
+    from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
 
     # バックグラウンドでチェック
     import threading
@@ -235,6 +238,86 @@ def _check_and_show_update() -> None:
 
     skip_btn.clicked.connect(dialog.reject)
 
+    # 画面右上の「✕」。更新中でもいつでも閉じられる（閉じても本体は旧版のまま起動する）。
+    close_btn = QPushButton("✕")
+    close_btn.setObjectName("closeBtn")
+    close_btn.setFixedSize(28, 28)
+    close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    close_btn.setStyleSheet(
+        "QPushButton#closeBtn{background:transparent;border:none;color:rgba(255,255,255,0.4);font-size:15px;}"
+        "QPushButton#closeBtn:hover{color:rgba(255,255,255,0.9);}"
+    )
+    close_btn.clicked.connect(dialog.reject)
+    _hdr = QHBoxLayout()
+    _hdr.setContentsMargins(0, 0, 0, 0)
+    _hdr.addStretch()
+    _hdr.addWidget(close_btn)
+    root.insertLayout(0, _hdr)
+
+    # ダイアログの更新はすべてGUIスレッドで行う（ワーカースレッドからは信号で依頼する）
+    class _UpdSignals(QObject):
+        status = Signal(str)
+        progress = Signal(int)
+        busy = Signal()
+        finished = Signal(str, str)  # kind, message
+
+    sig = _UpdSignals()
+    _upd_refs.append(sig)
+    state = {"closed": False}
+    dialog.finished.connect(lambda *_: state.__setitem__("closed", True))
+
+    def _on_status(msg):
+        if not state["closed"]:
+            status_label.setText(msg)
+
+    def _on_progress(pct):
+        if not state["closed"]:
+            progress.setRange(0, 100)
+            progress.setValue(pct)
+
+    def _on_busy():
+        if not state["closed"]:
+            progress.setRange(0, 0)  # 動き続けるバー（インストール中）
+
+    def _relaunch_and_exit():
+        import subprocess as _sp
+        from sysenv import get_clean_subprocess_env
+        try:
+            _sp.Popen([sys.executable], start_new_session=True, env=get_clean_subprocess_env())
+            os._exit(0)
+        except Exception as _e:
+            print(f"[Updater] 自動再起動に失敗: {_e}", flush=True)
+            status_label.setText("✅ インストール完了。✕を押してから、Ink Bossを起動し直してください。")
+            QTimer.singleShot(4000, dialog.accept)
+
+    def _on_finished(kind, message):
+        if state["closed"]:
+            # 画面を閉じた後に終わった。起動中の本体は止めず、次回起動から新版になる
+            print(f"[Updater] 更新処理が終了しました ({kind})", flush=True)
+            return
+        progress.setRange(0, 100)
+        if kind == "win":
+            progress.setValue(100)
+            status_label.setText("✅ 更新を開始します。自動で再起動します...")
+            QTimer.singleShot(2000, lambda: os._exit(0))
+        elif kind == "ok":
+            progress.setValue(100)
+            if getattr(sys, "frozen", False):
+                status_label.setText("✅ インストール完了。自動で再起動します...")
+                QTimer.singleShot(1500, _relaunch_and_exit)
+            else:
+                status_label.setText("✅ インストール完了。自動で閉じます。起動し直してください。")
+                QTimer.singleShot(3000, dialog.accept)
+        else:
+            status_label.setText(message)
+            update_btn.setEnabled(True)
+            skip_btn.setEnabled(True)
+
+    sig.status.connect(_on_status, Qt.ConnectionType.QueuedConnection)
+    sig.progress.connect(_on_progress, Qt.ConnectionType.QueuedConnection)
+    sig.busy.connect(_on_busy, Qt.ConnectionType.QueuedConnection)
+    sig.finished.connect(_on_finished, Qt.ConnectionType.QueuedConnection)
+
     def on_update():
         if not dl_url:
             status_label.setText("ダウンロードURLが見つかりません。GitHubを確認してください。")
@@ -248,48 +331,34 @@ def _check_and_show_update() -> None:
         def _progress(dl, total):
             if total > 0:
                 pct = int(dl / total * 100)
-                progress.setValue(pct)
-                status_label.setText(f"ダウンロード中... {pct}%")
-            qt_app.processEvents()
+                sig.progress.emit(pct)
+                sig.status.emit(f"ダウンロード中... {pct}%")
+
+        def _phase(phase):
+            if phase == "installing":
+                sig.busy.emit()
+                sig.status.emit("インストール中です（数分かかることがあります）。✕で閉じても、そのまま続きます。")
 
         import threading
         def _do():
-            ok = download_and_install(dl_url, _progress)
+            try:
+                ok = download_and_install(dl_url, _progress, _phase)
+            except Exception as _e:
+                print(f"[Updater] 予期しないエラー: {_e}", flush=True)
+                sig.finished.emit("fail", f"❌ 更新に失敗しました: {_e}")
+                return
             if ok and sys.platform == "win32":
-                # インストーラーが Ink Boss を入れ替えて自動で再起動する
-                status_label.setText("✅ 更新を開始します。自動で再起動します...")
-                progress.setValue(100)
-                qt_app.processEvents()
-                import time as _t
-                _t.sleep(2.0)
-                os._exit(0)
+                sig.finished.emit("win", "")
             elif ok:
-                progress.setValue(100)
-                if getattr(sys, "frozen", False):
-                    # インストール済みの本体を、更新後のファイルで起動し直す
-                    status_label.setText("✅ インストール完了。自動で再起動します...")
-                    qt_app.processEvents()
-                    import time as _t, subprocess as _sp
-                    from sysenv import get_clean_subprocess_env
-                    _t.sleep(1.5)
-                    try:
-                        _sp.Popen([sys.executable], start_new_session=True,
-                                  env=get_clean_subprocess_env())
-                        os._exit(0)
-                    except Exception as _e:
-                        print(f"[Updater] 自動再起動に失敗: {_e}", flush=True)
-                status_label.setText("✅ インストール完了。「閉じる」を押してから、起動し直してください。")
-                skip_btn.setText("閉じる")
-                skip_btn.setEnabled(True)
+                sig.finished.emit("ok", "")
             else:
                 import updater as _upd
                 if getattr(_upd, "last_error", "") == "install":
-                    status_label.setText("❌ インストールが完了しませんでした（認証のキャンセルなど）。もう一度お試しください。")
+                    pkg = getattr(_upd, "last_package_path", "")
+                    hint = f"\n手動で入れる場合: sudo dpkg -i {pkg}" if pkg else ""
+                    sig.finished.emit("fail", "❌ インストールが完了しませんでした（認証のキャンセルなど）。もう一度お試しください。" + hint)
                 else:
-                    status_label.setText("❌ ダウンロードに失敗しました。")
-                update_btn.setEnabled(True)
-                skip_btn.setEnabled(True)
-            qt_app.processEvents()
+                    sig.finished.emit("fail", "❌ ダウンロードに失敗しました。")
 
         threading.Thread(target=_do, daemon=True).start()
 
