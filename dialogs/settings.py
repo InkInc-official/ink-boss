@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import urllib.error
 import urllib.request
 from pathlib import Path
 from PySide6.QtWidgets import (
@@ -753,6 +754,65 @@ def show_settings_dialog(config: dict, js_eval_fn):
         ai_l.addWidget(key_in)
         key_inputs[key_field] = key_in
 
+    # --- ゲートウェイ（OpenAI互換: AQBot など） ---
+    _, gw_btn = make_backend_row(
+        "gateway", "ゲートウェイ（OpenAI互換）", "AQBotなど。URL＋キーで接続（同じPC内向け）"
+    )
+    gw_btn.clicked.connect(lambda checked=False: select_backend("gateway"))
+    ai_l.addWidget(sec_lbl("ゲートウェイ URL"))
+    gw_url_in = text_input(
+        config["llm"].get("gatewayUrl", "http://127.0.0.1:8080/v1"), "http://127.0.0.1:8080/v1"
+    )
+    ai_l.addWidget(gw_url_in)
+    ai_l.addWidget(sec_lbl("ゲートウェイ キー（発行し直したら貼り替え）"))
+    gw_key_in = text_input(config["llm"].get("gatewayKey", ""), "キーを貼り付け")
+    gw_key_in.setEchoMode(QLineEdit.EchoMode.Password)
+    ai_l.addWidget(gw_key_in)
+    ai_l.addWidget(sec_lbl("ゲートウェイ モデル"))
+    gw_model_combo = QComboBox()
+    gw_model_combo.setEditable(True)
+    gw_model_combo.setCurrentText(config["llm"].get("gatewayModel", ""))
+    ai_l.addWidget(gw_model_combo)
+    gw_fetch_btn = QPushButton("モデル一覧を取得")
+    ai_l.addWidget(gw_fetch_btn)
+    gw_msg = QLabel("")
+    gw_msg.setWordWrap(True)
+    gw_msg.setStyleSheet("color: rgba(255,255,255,0.5); font-size: 11px;")
+    ai_l.addWidget(gw_msg)
+
+    def on_gw_fetch():
+        base = gw_url_in.text().strip().rstrip("/")
+        key = gw_key_in.text().strip()
+        if not base:
+            gw_msg.setText("URLを入力してください")
+            return
+        req = urllib.request.Request(f"{base}/models")
+        if key:
+            req.add_header("Authorization", f"Bearer {key}")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                data = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                gw_msg.setText("キーが無効か期限切れです。キーを貼り替えてください")
+            else:
+                gw_msg.setText(f"エラー: HTTP {e.code}")
+            return
+        except Exception:
+            gw_msg.setText("接続できません。AQBotが起動しているか、URLを確認してください")
+            return
+        ids = sorted({m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")})
+        if not ids:
+            gw_msg.setText("モデルが見つかりませんでした")
+            return
+        cur = gw_model_combo.currentText().strip()
+        gw_model_combo.clear()
+        gw_model_combo.addItems(ids)
+        gw_model_combo.setCurrentText(cur if cur in ids else ids[0])
+        gw_msg.setText(f"✓ {len(ids)} 個のモデルを取得しました（保存を忘れずに）")
+
+    gw_fetch_btn.clicked.connect(lambda checked=False: on_gw_fetch())
+
     ai_save = QPushButton("APIキーを保存")
     ai_save.setObjectName("addBtn")
     save_msg = QLabel("")
@@ -762,6 +822,11 @@ def show_settings_dialog(config: dict, js_eval_fn):
         if "llm" not in config:
             config["llm"] = {}
         config["llm"].update({field: inp.text().strip() for field, inp in key_inputs.items()})
+        config["llm"].update({
+            "gatewayUrl": gw_url_in.text().strip(),
+            "gatewayKey": gw_key_in.text().strip(),
+            "gatewayModel": gw_model_combo.currentText().strip(),
+        })
         save_config(config)
         save_msg.setText("✓ 保存しました")
         QTimer.singleShot(2000, lambda: save_msg.setText(""))

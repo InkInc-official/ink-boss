@@ -721,6 +721,12 @@ class InkBossAPI:
             save_config(self._config)
         return ok
 
+    def reorder_workspaces(self, ids):
+        ok = ws_mod.reorder_workspaces(self._config, ids)
+        if ok:
+            save_config(self._config)
+        return ok
+
     def set_active_workspace(self, wid):
         ok = ws_mod.set_active(self._config, wid)
         if ok:

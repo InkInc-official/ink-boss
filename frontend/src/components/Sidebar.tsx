@@ -11,7 +11,7 @@ export default function Sidebar() {
     setActiveService, toggleGroupCollapsed,
     moveService, dropServiceLocal, reorderServices,
     removeGroup, setHibernated, updateService,
-    setActiveWorkspace, renameWorkspace, removeWorkspace, reorderGroups,
+    setActiveWorkspace, renameWorkspace, removeWorkspace, reorderWorkspaces, reorderGroups,
   } = useAppStore();
   // 開いているワークスペースから見たサービス/グループ（「すべて」は従来どおり）
   const { services, groups } = useMemo(
@@ -33,6 +33,8 @@ export default function Sidebar() {
   const [editingGroupName, setEditingGroupName] = useState("");
   const [confirmDeleteGroupId, setConfirmDeleteGroupId] = useState<string | null>(null);
   const dragService = useRef<string | null>(null);
+  const dragWsId = useRef<string | null>(null);
+  const [dragOverWsId, setDragOverWsId] = useState<string | null>(null);
   const dragSourceGroup = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -402,7 +404,25 @@ export default function Sidebar() {
                   );
                 }
                 return (
-                  <div key={w.id} className={`group/ws flex items-center gap-1 px-2 py-1.5 mx-1 rounded-lg cursor-pointer ${isCur ? "bg-white/10 text-white" : "text-white/60 hover:bg-white/5 hover:text-white/90"}`}
+                  <div key={w.id} className={`group/ws flex items-center gap-1 px-2 py-1.5 mx-1 rounded-lg cursor-pointer ${isCur ? "bg-white/10 text-white" : "text-white/60 hover:bg-white/5 hover:text-white/90"} ${dragOverWsId === w.id && !isAll ? "ring-1 ring-white/40" : ""}`}
+                    draggable={!isAll}
+                    onDragStart={(e) => { if (isAll) return; e.stopPropagation(); dragWsId.current = w.id; e.dataTransfer.setData("dragWsId", w.id); e.dataTransfer.effectAllowed = "move"; }}
+                    onDragOver={(e) => { if (dragWsId.current && !isAll) { e.preventDefault(); e.stopPropagation(); setDragOverWsId(w.id); } }}
+                    onDragLeave={() => setDragOverWsId((cur) => (cur === w.id ? null : cur))}
+                    onDrop={(e) => {
+                      const from = dragWsId.current;
+                      dragWsId.current = null;
+                      setDragOverWsId(null);
+                      if (!from || isAll || from === w.id) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      const all = workspaces.map((x) => x.id);
+                      const movingDown = all.indexOf(from) < all.indexOf(w.id);
+                      const ids = all.filter((id) => id !== from);
+                      ids.splice(ids.indexOf(w.id) + (movingDown ? 1 : 0), 0, from);
+                      void reorderWorkspaces(ids);
+                    }}
+                    onDragEnd={() => { dragWsId.current = null; setDragOverWsId(null); }}
                     onClick={() => { void setActiveWorkspace(w.id); setWsMenuOpen(false); }}>
                     <span className="w-4 text-right text-[10px] font-mono text-white/30 flex-shrink-0">{wsIdx}</span>
                     <span className="flex-1 text-sm truncate">{w.name}</span>

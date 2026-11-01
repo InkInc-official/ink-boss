@@ -30,7 +30,7 @@ export interface Workspace {
 /** 「すべて」（削除・改名できない常設ワークスペース。従来の並び/グループそのもの） */
 export const ALL_WORKSPACE_ID = "all";
 
-export type LLMBackend = "ollama" | "claude" | "gemini" | "deepseek";
+export type LLMBackend = "ollama" | "claude" | "gemini" | "deepseek" | "gateway";
 
 export interface LLMConfig {
   backend: LLMBackend;
@@ -39,6 +39,9 @@ export interface LLMConfig {
   claudeApiKey: string;
   geminiApiKey: string;
   deepseekApiKey: string;
+  gatewayUrl: string;
+  gatewayKey: string;
+  gatewayModel: string;
 }
 
 export interface AppConfig {
@@ -71,6 +74,7 @@ declare global {
         update_group: (id: string, name: string, workspaceId?: string) => Promise<void>;
         remove_group: (id: string, deleteServices: boolean, workspaceId?: string) => Promise<void>;
         rename_workspace?: (id: string, name: string) => Promise<boolean>;
+        reorder_workspaces?: (ids: string[]) => Promise<boolean>;
         remove_workspace?: (id: string) => Promise<boolean>;
         set_active_workspace?: (id: string) => Promise<boolean>;
         show_add_workspace_dialog?: () => Promise<void>;

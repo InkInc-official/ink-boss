@@ -13,6 +13,9 @@ const defaultConfig: AppConfig = {
     claudeApiKey: "",
     geminiApiKey: "",
     deepseekApiKey: "",
+    gatewayUrl: "http://127.0.0.1:8080/v1",
+    gatewayKey: "",
+    gatewayModel: "",
   },
   services: [],
   groups: [],
@@ -55,6 +58,7 @@ interface AppStore {
   setActiveWorkspace: (id: string) => Promise<void>;
   renameWorkspace: (id: string, name: string) => Promise<void>;
   removeWorkspace: (id: string) => Promise<void>;
+  reorderWorkspaces: (ids: string[]) => Promise<void>;
   /** Python側で処理済みのイベントを反映するだけ（APIは呼ばない） */
   workspaceAddedLocal: (ws: Workspace) => void;
   groupAddedLocal: (g: Group, workspaceId?: string) => void;
@@ -155,6 +159,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
     if (!n) return;
     await api().rename_workspace?.(id, n);
     set((s) => ({ workspaces: mapWs(s.workspaces, id, (w) => ({ ...w, name: n })) }));
+  },
+
+  reorderWorkspaces: async (ids) => {
+    set((s) => {
+      const rank = (w: Workspace) => (ids.includes(w.id) ? ids.indexOf(w.id) : 999);
+      return { workspaces: [...s.workspaces].sort((a, b) => rank(a) - rank(b)) };
+    });
+    try {
+      await api().reorder_workspaces?.(ids);
+    } catch (e) {
+      console.warn("[reorderWorkspaces]", e);
+    }
   },
 
   removeWorkspace: async (id) => {

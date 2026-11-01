@@ -45,6 +45,34 @@ Ferdium・Rambox・Station のような「マルチサービス統合アプリ�
   それ以外はElectronをデフォルト提案します（手動で切り替えも可能）。
 - サービスごとに独立したプロファイル（Cookie・LocalStorage）を持ち、
   アカウント間のセッションは完全に分離されます。
+- ElectronはCloudflareのTurnstile（人間確認）を通過できないサイトがあります。
+  そのようなサイトはQtエンジンに切り替えてください。
+
+---
+
+## キーボードショートカット
+
+| キー | 動作 |
+|---|---|
+| Alt + 0〜9 | ワークスペースを切り替え（0 = すべて、番号はプルダウンの並び順） |
+| Alt + N → 数字 → Enter | 10番以降のワークスペースへ（数字入力後1秒で確定、Escでキャンセル） |
+| Ctrl + Alt + B | サイドバーの開閉 |
+| Ctrl + Alt + , | 設定を開く |
+| Ctrl + Alt + E | グループの全展開 / 全折りたたみ |
+| Ctrl + Alt + K | クイックスイッチ（サービス・ワークスペースを検索して移動） |
+| Ctrl + Alt + Z | 開いているサービス以外をすべて休止 |
+| Ctrl + Alt + H | 開いているサービスを休止 |
+
+設定の「ショートカット」タブでも一覧を確認できます。キーは固定です。
+
+## Aide（AIアシスタント）
+
+右上の「Aide」から開くサイドパネルです。開いているページの内容をもとに、要約や質問ができます。
+使うAIは設定の「AI / LLM」で選べます。
+
+- ローカルAI（Ollama）
+- Claude / Gemini / DeepSeek（各APIキー）
+- ゲートウェイ（OpenAI互換）— AQBotなど、OpenAI互換のAPIをまとめたものを使えます。URLとキーを入れて「モデル一覧を取得」を押すと、使えるモデルを選べます。
 
 ---
 
@@ -159,7 +187,10 @@ powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_installer.ps1
 
 ## ロードマップ
 
-- [ ] 1サービス内での複数タブ機能
+- [ ] 1サービス内での複数タブ機能（V3で検討）
+- [x] ワークスペースの並び替え（ドラッグ&ドロップ）
+- [x] キーボードショートカット
+- [x] ゲートウェイ（OpenAI互換API）対応
 - [x] サービスのフォルダ分け（ドラッグ&ドロップでの並べ替え）
 - [x] Windows対応
 - [ ] macOS対応
@@ -236,6 +267,35 @@ So Ink Boss uses a **dual-engine design**: you choose QtWebEngine or Electron pe
 
 - When you add a service, Ink Boss auto-suggests Qt for Google-domain URLs and Electron for everything else (you can switch manually).
 - Each service gets an isolated profile (cookies, LocalStorage) — sessions never leak between accounts.
+
+- Electron cannot pass Cloudflare Turnstile (human verification) on some sites.
+  Switch those services to the Qt engine.
+
+---
+
+### Keyboard shortcuts
+
+| Keys | Action |
+|---|---|
+| Alt + 0–9 | Switch workspace (0 = All; numbers follow the dropdown order) |
+| Alt + N → digits → Enter | Go to workspace 10 and above (confirms after 1 s idle; Esc cancels) |
+| Ctrl + Alt + B | Toggle sidebar |
+| Ctrl + Alt + , | Open settings |
+| Ctrl + Alt + E | Expand / collapse all groups |
+| Ctrl + Alt + K | Quick switcher (search services and workspaces) |
+| Ctrl + Alt + Z | Hibernate everything except the open service |
+| Ctrl + Alt + H | Hibernate the open service |
+
+The same list is shown in Settings → Shortcuts. Keys are fixed.
+
+### Aide (AI assistant)
+
+The side panel opened from "Aide" at the top right. It works from the page you are viewing (summaries, questions).
+Choose the AI in Settings → AI / LLM:
+
+- Local AI (Ollama)
+- Claude / Gemini / DeepSeek (API keys)
+- Gateway (OpenAI-compatible) — use an aggregator such as AQBot. Enter its URL and key, press "Fetch models", and pick a model.
 
 ---
 
@@ -348,7 +408,10 @@ Output: `dist\installer\Ink-Boss-Setup-<version>.exe`
 
 ### Roadmap
 
-- [ ] Multiple tabs within a single service
+- [ ] Multiple tabs within a single service (considered for V3)
+- [x] Workspace reordering (drag & drop)
+- [x] Keyboard shortcuts
+- [x] Gateway (OpenAI-compatible API) support
 - [x] Folder grouping for services (drag & drop reordering)
 - [x] Windows support
 - [ ] macOS support

@@ -187,6 +187,13 @@ def reorder_groups(cfg: dict, wid, ids) -> bool:
     return True
 
 
+def reorder_workspaces(cfg: dict, ids) -> bool:
+    """ワークスペース自体の並び替え（「すべて」は仮想なので対象外）。"""
+    order = list(ids or [])
+    _list(cfg).sort(key=lambda w: order.index(w["id"]) if w["id"] in order else 999)
+    return True
+
+
 # ── 整合性 ─────────────────────────────────────────────
 def normalize(cfg: dict) -> bool:
     """設定を読み込んだときに呼ぶ。存在しないサービス/グループへの参照を除き、

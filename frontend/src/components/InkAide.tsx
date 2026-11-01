@@ -69,6 +69,9 @@ export default function InkAide({ open, onClose }: Props) {
         } else if (backend === "deepseek") {
           setCurrentBackend("DeepSeek");
           if (llm.deepseekApiKey) { setIsReady(true); }
+        } else if (backend === "gateway") {
+          setCurrentBackend(llm.gatewayModel || "ゲートウェイ");
+          if (llm.gatewayUrl && llm.gatewayModel) { setIsReady(true); }
         } else {
           const model = llm.ollamaModel || "qwen2.5:3b";
           setCurrentBackend(model);
@@ -139,6 +142,22 @@ export default function InkAide({ open, onClose }: Props) {
         });
         const data = await res.json();
         reply = data.choices?.[0]?.message?.content || "応答できませんでした";
+      } else if (backend === "gateway" && llm.gatewayUrl && llm.gatewayModel) {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (llm.gatewayKey) headers["Authorization"] = `Bearer ${llm.gatewayKey}`;
+        const res = await fetch(`${String(llm.gatewayUrl).replace(/\/+$/, "")}/chat/completions`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ model: llm.gatewayModel, messages: [{ role: "user", content: fullPrompt }], max_tokens: 1000 })
+        });
+        if (res.status === 401 || res.status === 403) {
+          reply = "キーが無効か期限切れです。設定のゲートウェイキーを貼り替えてください。";
+        } else if (!res.ok) {
+          reply = `ゲートウェイエラー: HTTP ${res.status}`;
+        } else {
+          const data = await res.json();
+          reply = data.choices?.[0]?.message?.content || "応答できませんでした";
+        }
       } else if (backend === "ollama") {
         const ollamaUrl = llm.ollamaUrl || "http://localhost:11434";
         const model = llm.ollamaModel || "qwen2.5:3b";
@@ -150,7 +169,7 @@ export default function InkAide({ open, onClose }: Props) {
         const data = await res.json();
         reply = data.response || "応答できませんでした";
       } else {
-        reply = "APIキーが設定されていません。設定画面で入力してください。";
+        reply = backend === "gateway" ? "ゲートウェイのURLとモデルを設定画面で入力してください。" : "APIキーが設定されていません。設定画面で入力してください。";
       }
 
       setMessages(prev => [...prev, { role: "assistant", content: reply }]);
