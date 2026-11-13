@@ -47,6 +47,9 @@ Ferdium・Rambox・Station のような「マルチサービス統合アプリ�
   アカウント間のセッションは完全に分離されます。
 - ElectronはCloudflareのTurnstile（人間確認）を通過できないサイトがあります。
   そのようなサイトはQtエンジンに切り替えてください。
+- Qtエンジンは、AAC・H.264の音声・動画を再生できません（一部の音楽・動画サービスが該当）。
+  その場合はElectronエンジンか、ブラウザをお使いください。
+  ただし、Googleログインが必要なサービスは、Electronではログインできないことがあります。
 
 ---
 
@@ -270,6 +273,9 @@ So Ink Boss uses a **dual-engine design**: you choose QtWebEngine or Electron pe
 
 - Electron cannot pass Cloudflare Turnstile (human verification) on some sites.
   Switch those services to the Qt engine.
+- The Qt engine cannot play AAC / H.264 audio and video (some music and video services).
+  Use the Electron engine or a regular browser for those.
+  Services that require Google sign-in may not allow sign-in on Electron.
 
 ---
 
